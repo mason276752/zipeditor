@@ -119,6 +119,8 @@ select {
 .banner > .icon { width: 18px; height: 18px; color: var(--accent); }
 .banner b { word-break: break-all; }
 .selbar { border-color: var(--line); background: var(--panel); }
+.send-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.send-group > .icon { color: var(--accent); }
 .spinner {
   width: 16px; height: 16px; flex: none;
   border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent);

@@ -17,26 +17,29 @@
 
 ## 和其他工具串接
 
-三個工具都放在 `mason276752.github.io` 底下，屬於同一個 origin，所以可以用 [BroadcastChannel](https://developer.mozilla.org/docs/Web/API/BroadcastChannel) 互傳檔案（同一個瀏覽器裡的分頁之間）：
+這些工具都放在 `mason276752.github.io` 底下，屬於同一個 origin，所以可以用 [BroadcastChannel](https://developer.mozilla.org/docs/Web/API/BroadcastChannel) 互傳檔案（同一個瀏覽器裡的分頁之間）：
 
 | 從 | 到 | 做什麼 |
 | --- | --- | --- |
 | ZIP 編輯器 | [ziptotaiwanzip](https://github.com/mason276752/ziptotaiwanzip) | 「簡繁轉換」把整個 ZIP 送去轉換檔名與文字內容，轉好自動傳回並套用（可復原） |
 | ZIP 編輯器 | [paste2jpg](https://github.com/mason276752/paste2jpg) | 勾選圖片或在預覽裡按「Paste → JPG」，把圖片送去轉成 JPG／WebP |
-| paste2jpg | ZIP 編輯器 | 「傳到 ZIP 編輯器」把轉好的圖片打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
+| ZIP 編輯器 | [upscale](https://github.com/mason276752/upscale) | 勾選圖片或在預覽裡按「圖片放大」，把圖片送去 AI 放大 2×／4× |
+| ZIP 編輯器 | [removebg](https://github.com/mason276752/removebg) | 勾選圖片或在預覽裡按「去背」，把圖片送去 AI 去背 |
+| ZIP 編輯器 | [audiospeed](https://github.com/mason276752/audiospeed) | 勾選音檔或在預覽裡按「音檔變速」，把音檔送去加快／放慢（音高不變） |
+| paste2jpg、upscale、removebg、audiospeed | ZIP 編輯器 | 「傳到 ZIP 編輯器」把處理好的檔案打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
 
-對方的分頁沒開的話會自動開新分頁。
+對方的分頁沒開的話會自動開新分頁。哪些工具收哪種檔案定義在 `src/bridge.ts` 的 `FILE_TOOLS`。
 
 ### 訊息格式
 
-每個工具監聽以自己命名的 channel（`zipeditor`、`ziptotaiwanzip`、`paste2jpg`）：
+每個工具監聽以自己命名的 channel（`zipeditor`、`ziptotaiwanzip`、`paste2jpg`、`upscale`、`removebg`、`audiospeed`）：
 
 | 訊息 | 說明 |
 | --- | --- |
 | `{type:'ping'}` | 詢問有哪些分頁開著 |
 | `{type:'ready', id}`／`{type:'bye', id}` | 分頁宣告自己開著／要關閉 |
 | `{type:'zip', to, id, file, from?, replyTo?, inReplyTo?}` | 傳一個 ZIP 給 `to` 這個分頁 |
-| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg 接收圖片用） |
+| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg、upscale、removebg、audiospeed 接收用） |
 | `{type:'received', id}` | 收件分頁的回條 |
 
 `replyTo: {app, to}` 請對方把處理結果傳回 `app` channel 上的 `to` 分頁，而不是直接下載；回傳的訊息帶 `inReplyTo` 對應原本的 `id`。對方 3 秒內沒回條就改成下載。
@@ -49,7 +52,7 @@ npm run dev        # http://localhost:5173/zipeditor/
 npm run build      # 型別檢查 + 輸出到 dist/
 ```
 
-本機開發時三個工具在不同的 port，不同 origin 之間無法用 BroadcastChannel；要測串接，請把三個工具的建置結果放在同一個伺服器底下（例如 `/paste2jpg/`、`/ziptotaiwanzip/`、`/zipeditor/`）。
+本機開發時各個工具在不同的 port，不同 origin 之間無法用 BroadcastChannel；要測串接，請把各工具的建置結果放在同一個伺服器底下（例如 `/paste2jpg/`、`/upscale/`、`/zipeditor/`）。
 
 推到 `main` 後，GitHub Actions 會建置並發布到 `gh-pages` 分支。
 

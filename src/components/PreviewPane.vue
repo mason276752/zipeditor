@@ -3,16 +3,17 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { baseName, readEntry, type FileEntry } from '../archive'
 import { kindOf, looksLikeText, mimeOf, type Kind } from '../kinds'
 import { fmtBytes, fmtDate } from '../util'
+import { FILE_TOOLS, TOOLS, type FileKind, type Tool } from '../bridge'
 import Icon from './Icon.vue'
 
-const props = defineProps<{ entry: FileEntry; canSendImage: boolean }>()
+const props = defineProps<{ entry: FileEntry; canSend: boolean }>()
 const emit = defineEmits<{
   close: []
   save: [blob: Blob]
   download: []
   rename: []
   remove: []
-  sendImage: []
+  send: [tool: Tool]
   dirty: [dirty: boolean]
 }>()
 
@@ -25,6 +26,7 @@ const loading = ref(true)
 const failed = ref('')
 const dims = ref('')
 const mediaError = ref(false)
+const sendTargets = computed<Tool[]>(() => (kind.value in FILE_TOOLS ? FILE_TOOLS[kind.value as FileKind] : []))
 
 // Text editing. The textarea only ever holds "\n"; CRLF files get theirs back on save.
 const text = ref('')
@@ -133,10 +135,12 @@ const lines = computed(() => (textMode.value ? text.value.split('\n').length : 0
         <button type="button" class="btn primary" :disabled="!dirty" @click="save">儲存 <kbd>⌘S</kbd></button>
         <button type="button" class="btn" :disabled="!dirty" @click="revert">還原</button>
       </template>
-      <button v-if="kind === 'image' && canSendImage" type="button" class="btn" @click="emit('sendImage')"
-              title="傳到 Paste → JPG 轉成 JPG／WebP">
-        <Icon name="send" />Paste → JPG
-      </button>
+      <template v-if="canSend && !textMode">
+        <button v-for="t in sendTargets" :key="t" type="button" class="btn" :title="`傳到${TOOLS[t].label}：${TOOLS[t].hint}`"
+                @click="emit('send', t)">
+          <Icon name="send" />{{ TOOLS[t].label }}
+        </button>
+      </template>
       <span class="grow"></span>
       <button type="button" class="ib" title="下載這個檔案" @click="emit('download')"><Icon name="download" /></button>
       <button type="button" class="ib" title="重新命名" @click="emit('rename')"><Icon name="pencil" /></button>
@@ -163,7 +167,7 @@ const lines = computed(() => (textMode.value ? text.value.split('\n').length : 0
         <img v-if="!mediaError" :src="url" :alt="name" @load="onImageLoad" @error="mediaError = true" />
         <div v-else class="note">
           <p>這個瀏覽器無法預覽這張圖片。</p>
-          <p v-if="canSendImage" class="small">可以傳到 Paste → JPG 轉成 JPG／WebP（支援 HEIC）。</p>
+          <p v-if="canSend" class="small">可以傳到 Paste → JPG 轉成 JPG／WebP（支援 HEIC）。</p>
         </div>
       </template>
       <video v-else-if="kind === 'video'" :src="url" controls playsinline></video>

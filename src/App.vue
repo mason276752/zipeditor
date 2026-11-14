@@ -3,7 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   baseName, joinPath, normalizePath, parentOf, readEntry, useArchive, type FileEntry, type NameEncoding, type Row,
 } from './archive'
-import { bridgeSupported, listen, newId, replyAddress, send, toolLabel, TOOLS, type SendResult, type Tool, type ZipDelivery } from './bridge'
+import {
+  bridgeSupported, FILE_TOOLS, listen, newId, replyAddress, send, toolLabel, TOOLS,
+  type FileKind, type SendResult, type Tool, type ZipDelivery,
+} from './bridge'
 import { kindOf, mimeOf } from './kinds'
 import { droppedFiles, fmtBytes, pickedFiles, saveBlob, timeStamp, type Picked } from './util'
 import FileList from './components/FileList.vue'
@@ -31,7 +34,11 @@ const dirInput = ref<HTMLInputElement>()
 const rows = computed(() => archive.children(cwd.value))
 const activeEntry = computed(() => (activePath.value && files.value.get(activePath.value)) || null)
 const selectedRows = computed(() => rows.value.filter((r) => selected.value.has(r.path)))
-const selectedImages = computed(() => selectedRows.value.filter((r) => !r.dir && kindOf(r.name) === 'image'))
+const selectedOfKind = (k: FileKind) => selectedRows.value.filter((r) => !r.dir && kindOf(r.name) === k)
+const selectedByKind = computed(() =>
+  (Object.keys(FILE_TOOLS) as FileKind[]).map((k) => ({ kind: k, rows: selectedOfKind(k) })).filter((g) => g.rows.length),
+)
+const KIND_UNIT: Record<FileKind, string> = { image: '張圖片', audio: '個音檔' }
 const cwdName = computed(() => (cwd.value ? baseName(cwd.value) : name.value))
 const entryRow = (e: FileEntry): Row => ({
   path: e.path, name: baseName(e.path), dir: false, size: e.size, date: e.date, count: 0, entry: e,
@@ -279,21 +286,26 @@ async function convert() {
   }
 }
 
-async function sendImages(list: Row[]) {
+// Images go to paste2jpg / upscale / removebg, audio to audiospeed. Each tool sends its
+// results back as a zip, which lands in the inbox below.
+async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
   if (!list.length) return
-  const result = await send('paste2jpg', async () => ({
+  const result = await send(target, async () => ({
     type: 'files',
     id: newId(),
     files: await Promise.all(
       list.map(async (r) => new File([await readEntry(r.entry!)], r.name, { type: mimeOf(r.name) })),
     ),
   }))
-  if (result === 'sent') toast(`已傳送 ${list.length} 張圖片到 Paste → JPG，轉好後按「傳到 ZIP 編輯器」就會傳回來`)
-  else reportFailure(result, 'paste2jpg')
+  const label = TOOLS[target].label
+  if (result === 'sent') toast(`已傳送 ${list.length} ${KIND_UNIT[kind]}到${label}，處理好後按「傳到 ZIP 編輯器」就會傳回來`)
+  else reportFailure(result, target)
 }
 
-function sendActiveImage() {
-  if (activeEntry.value) sendImages([entryRow(activeEntry.value)])
+function sendActive(target: Tool) {
+  const e = activeEntry.value
+  const kind = e && kindOf(baseName(e.path))
+  if (e && (kind === 'image' || kind === 'audio')) sendFiles(target, [entryRow(e)], kind)
 }
 
 async function onZip(d: ZipDelivery) {
@@ -461,7 +473,7 @@ onBeforeUnmount(() => {
           <li><strong>整理</strong>：新增、刪除、重新命名檔案與資料夾；名稱裡打「/」可以搬到別的資料夾。所有操作都能復原（⌘Z）。</li>
           <li><strong>重新打包</strong>：選擇壓縮程度後下載；沒動過的檔案會沿用原本壓縮好的資料，大 ZIP 也很快。</li>
           <li><strong>中文檔名</strong>：Windows 做的 GBK／Big5 編碼 ZIP 也能正確顯示檔名。</li>
-          <li><strong>串接其他工具</strong>：可以把 ZIP 傳到<a href="../ziptotaiwanzip/">簡繁轉換工具</a>轉換後自動傳回來，把圖片傳到 <a href="../paste2jpg/">Paste → JPG</a> 壓縮，那邊轉好的圖片也能直接傳過來。</li>
+          <li><strong>串接其他工具</strong>：可以把 ZIP 傳到<a href="../ziptotaiwanzip/">簡繁轉換工具</a>轉換後自動傳回來；圖片可以傳到 <a href="../paste2jpg/">Paste → JPG</a> 壓縮、<a href="../upscale/">圖片放大</a>、<a href="../removebg/">去背</a>，音檔可以傳到<a href="../audiospeed/">音檔變速</a>，處理好的結果都能直接傳回來。</li>
         </ul>
       </section>
     </template>
@@ -522,10 +534,15 @@ onBeforeUnmount(() => {
 
       <div v-if="selected.size" class="selbar">
         <span class="grow">已選取 {{ selected.size }} 項</span>
-        <button v-if="bridgeSupported && selectedImages.length" type="button" class="btn small"
-                title="傳到 Paste → JPG 轉成 JPG／WebP" @click="sendImages(selectedImages)">
-          <Icon name="send" />{{ selectedImages.length }} 張圖片傳到 Paste → JPG
-        </button>
+        <template v-if="bridgeSupported">
+          <span v-for="g in selectedByKind" :key="g.kind" class="send-group">
+            <Icon name="send" />{{ g.rows.length }} {{ KIND_UNIT[g.kind] }}傳到
+            <button v-for="t in FILE_TOOLS[g.kind]" :key="t" type="button" class="btn small"
+                    :title="`傳到${TOOLS[t].label}：${TOOLS[t].hint}`" @click="sendFiles(t, g.rows, g.kind)">
+              {{ TOOLS[t].label }}
+            </button>
+          </span>
+        </template>
         <button type="button" class="btn small danger" @click="remove(selectedRows)"><Icon name="trash" />刪除</button>
         <button type="button" class="btn small" @click="selected.clear()">取消選取</button>
       </div>
@@ -536,17 +553,16 @@ onBeforeUnmount(() => {
                   @navigate="navigate" @open="openRow" @toggle="toggle" @toggle-all="toggleAll"
                   @start-rename="(p) => (renaming = p)" @rename="rename" @cancel-rename="renaming = null"
                   @remove="(r) => remove([r])" @download="downloadRow" />
-        <PreviewPane v-if="activeEntry" :entry="activeEntry" :can-send-image="bridgeSupported"
+        <PreviewPane v-if="activeEntry" :entry="activeEntry" :can-send="bridgeSupported"
                      @close="closePreview" @save="saveText" @dirty="(d) => (editorDirty = d)"
                      @download="downloadRow(entryRow(activeEntry))"
-                     @rename="renaming = activeEntry.path" @remove="removeActive" @send-image="sendActiveImage" />
+                     @rename="renaming = activeEntry.path" @remove="removeActive" @send="sendActive" />
       </div>
     </template>
 
     <footer>
       ZIP 編輯器 · 所有運算都在瀏覽器內完成 ·
-      <a href="../paste2jpg/">Paste → JPG</a> ·
-      <a href="../ziptotaiwanzip/">簡繁轉換工具</a> ·
+      <a href="../">更多工具</a> ·
       <a href="https://github.com/mason276752/zipeditor">GitHub 原始碼</a>
     </footer>
 
