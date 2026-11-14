@@ -5,7 +5,7 @@ import {
 } from './archive'
 import {
   bridgeSupported, FILE_TOOLS, listen, newId, replyAddress, send, toolLabel, TOOLS,
-  type FileKind, type SendResult, type Tool, type ZipDelivery,
+  type FileKind, type ResultUpdate, type SendResult, type Tool, type ZipDelivery,
 } from './bridge'
 import { kindOf, mimeOf } from './kinds'
 import { droppedFiles, fmtBytes, pickedFiles, saveBlob, timeStamp, type Picked } from './util'
@@ -286,20 +286,58 @@ async function convert() {
   }
 }
 
-// Images go to paste2jpg / upscale / removebg, audio to audiospeed, PDFs to pdfcompress. Each tool sends its
-// results back as a zip, which lands in the inbox below.
+// Images go to paste2jpg / upscale / removebg, audio to audiospeed, PDFs to pdfcompress. Each file
+// carries its origin, so the tool sends every result (and every later change to it) straight back:
+// see onUpdate.
 async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
   if (!list.length) return
+  const doc = archive.docId()
   const result = await send(target, async () => ({
     type: 'files',
     id: newId(),
     files: await Promise.all(
       list.map(async (r) => new File([await readEntry(r.entry!)], r.name, { type: mimeOf(r.name) })),
     ),
+    origins: list.map((r) => ({ ...replyAddress, key: `${doc}\n${r.path}` })),
   }))
   const label = TOOLS[target].label
-  if (result === 'sent') toast(`已傳送 ${list.length} ${KIND_UNIT[kind]}到${label}，處理好後按「傳到 ZIP 編輯器」就會傳回來`)
+  if (result === 'sent') toast(`已傳送 ${list.length} ${KIND_UNIT[kind]}到${label}，處理好會自動放回原檔旁邊`)
   else reportFailure(result, target)
+}
+
+// Where each tool result went, by `${doc}\n${from}\n${output}`, so a newer version of a result
+// replaces the older one even after its name changed (e.g. PNG → WebP).
+const resultPaths = new Map<string, string>()
+
+function freePath(dir: string, name: string, taken: Set<string>) {
+  const dot = name.lastIndexOf('.')
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
+  let path = joinPath(dir, name)
+  for (let n = 2; taken.has(path); n++) path = joinPath(dir, `${stem} (${n})${ext}`)
+  return path
+}
+
+function onUpdate(u: ResultUpdate) {
+  const cut = u.key.indexOf('\n')
+  const doc = Number(u.key.slice(0, cut))
+  const source = u.key.slice(cut + 1)
+  const label = toolLabel(u.from)
+  if (!isOpen.value || doc !== archive.docId()) {
+    toast(`「${label}」傳回的 ${u.file.name} 沒有放進來：原本的 ZIP 已經關掉或換掉了`)
+    return
+  }
+  const name = u.file.name.replace(/[\\/]/g, '_') || 'result'
+  const id = `${doc}\n${u.from}\n${u.output}`
+  const prev = resultPaths.get(id)
+  let path = prev && baseName(prev) === name ? prev : ''
+  if (!path) {
+    // Next to the original, numbered if another result already took that name.
+    const taken = new Set([...resultPaths].filter(([k]) => k !== id && k.startsWith(`${doc}\n`)).map(([, p]) => p))
+    path = freePath(parentOf(source), name, taken)
+  }
+  archive.putResult(path, u.file, prev, `「${label}」傳回的結果`, `result:${u.from}`)
+  resultPaths.set(id, path)
+  toast(`已${prev ? '更新' : '放入'}「${path}」（${label}）`, undoAction)
 }
 
 function sendActive(target: Tool) {
@@ -422,7 +460,7 @@ onMounted(() => {
   window.addEventListener('dragover', onDragOver)
   window.addEventListener('dragleave', onDragLeave)
   window.addEventListener('drop', onDrop)
-  stopListening = listen(onZip)
+  stopListening = listen(onZip, onUpdate)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)

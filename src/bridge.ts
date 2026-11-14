@@ -4,12 +4,20 @@
 //   {type:'ping'}                         anyone → tool   "who's open?"
 //   {type:'ready', id} / {type:'bye', id}  tool tab        announces itself / goes away
 //   {type:'zip', to, id, file, from?, replyTo?, inReplyTo?}
-//   {type:'files', to, id, files, from?}  delivery addressed to one tab, so two open copies
+//   {type:'files', to, id, files, from?, origins?}
+//                                         delivery addressed to one tab, so two open copies
 //                                         don't both act on it
+//   {type:'update', to, id, key, output, file, from}
+//                                         a tool's latest result for one of the files we sent
 //   {type:'received', id}                 that tab's ack
 //
 // replyTo {app, to} asks the receiver to send its result back to that tab instead of
 // downloading it; the answer carries inReplyTo with the request's id.
+//
+// origins[i] {app, to, key} says where files[i] came from. Whenever the tool makes or changes
+// its result for that file it sends an 'update' to that tab with the same key; `output` names
+// the result, so a newer version of the same result replaces the old one. A tool that hands
+// the file on to another tool passes the origin along, so results come back here either way.
 
 export type Tool = 'paste2jpg' | 'ziptotaiwanzip' | 'upscale' | 'removebg' | 'audiospeed' | 'pdfcompress'
 
@@ -37,6 +45,13 @@ export interface ZipDelivery {
   file: File
   from?: string
   inReplyTo?: string
+}
+
+export interface ResultUpdate {
+  key: string
+  output: string
+  file: File
+  from: string
 }
 
 export const bridgeSupported = typeof BroadcastChannel !== 'undefined'
@@ -105,8 +120,8 @@ export function send(target: Tool, build: () => Promise<Record<string, unknown> 
 
 export const replyAddress = { app: SELF, to: tabId }
 
-// Announces this tab and hands zips addressed to it to `onZip`.
-export function listen(onZip: (d: ZipDelivery) => void): () => void {
+// Announces this tab, hands zips addressed to it to `onZip` and results coming back to `onUpdate`.
+export function listen(onZip: (d: ZipDelivery) => void, onUpdate: (u: ResultUpdate) => void): () => void {
   if (!bridgeSupported) return () => {}
   for (const name of Object.keys(TOOLS) as Tool[]) peer(name) // learn which tools are already open
   const channel = new BroadcastChannel(SELF)
@@ -122,6 +137,9 @@ export function listen(onZip: (d: ZipDelivery) => void): () => void {
     } else if (m?.type === 'zip' && m.to === tabId && m.file instanceof File) {
       channel.postMessage({ type: 'received', id: m.id })
       onZip({ id: m.id, file: m.file, from: m.from, inReplyTo: m.inReplyTo })
+    } else if (m?.type === 'update' && m.to === tabId && m.file instanceof File && typeof m.key === 'string') {
+      channel.postMessage({ type: 'received', id: m.id })
+      onUpdate({ key: m.key, output: String(m.output), file: m.file, from: String(m.from) })
     }
   }
   window.addEventListener('pagehide', bye)

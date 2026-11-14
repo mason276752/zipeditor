@@ -25,6 +25,7 @@ interface Snapshot {
   files: Map<string, FileEntry>
   dirs: Set<string>
   label: string
+  mergeKey?: string
 }
 
 const HISTORY_LIMIT = 100
@@ -122,6 +123,7 @@ export function useArchive() {
   const past = shallowRef<Snapshot[]>([])
   const future = shallowRef<Snapshot[]>([])
   let original: Blob | null = null // the zip as opened, for re-reading with another name encoding
+  let doc = 0 // changes whenever another zip is opened, so late results from other tools can't land in it
 
   const allDirs = computed(() => {
     const out = new Set(dirs.value)
@@ -135,6 +137,7 @@ export function useArchive() {
   })
 
   function reset(next: { files: Map<string, FileEntry>; dirs: Set<string> }, zipName: string) {
+    doc++
     files.value = next.files
     dirs.value = next.dirs
     name.value = zipName
@@ -163,6 +166,7 @@ export function useArchive() {
   }
 
   function close() {
+    doc++
     original = null
     isOpen.value = false
     files.value = new Map()
@@ -172,8 +176,10 @@ export function useArchive() {
     dirty.value = false
   }
 
-  function commit(nextFiles: Map<string, FileEntry>, nextDirs: Set<string>, label: string) {
-    past.value = [...past.value.slice(-(HISTORY_LIMIT - 1)), { files: files.value, dirs: dirs.value, label }]
+  // Consecutive commits with the same `mergeKey` (a tool syncing its results back) undo as one step.
+  function commit(nextFiles: Map<string, FileEntry>, nextDirs: Set<string>, label: string, mergeKey?: string) {
+    const merge = mergeKey && past.value.at(-1)?.mergeKey === mergeKey && !future.value.length
+    if (!merge) past.value = [...past.value.slice(-(HISTORY_LIMIT - 1)), { files: files.value, dirs: dirs.value, label, mergeKey }]
     future.value = []
     files.value = nextFiles
     dirs.value = nextDirs
@@ -250,6 +256,15 @@ export function useArchive() {
       if (p) d.add(p)
     }
     commit(f, d, label)
+  }
+
+  // A result another tool sent back: write it at `path`, dropping `replaces` (where the previous
+  // version of the same result was, if its name has changed since).
+  function putResult(path: string, blob: Blob, replaces: string | undefined, label: string, mergeKey: string) {
+    const f = new Map(files.value)
+    if (replaces && replaces !== path) f.delete(replaces)
+    f.set(path, { path, size: blob.size, date: new Date(), source: blob })
+    commit(f, dirs.value, label, mergeKey)
   }
 
   function writeFile(path: string, blob: Blob) {
@@ -361,8 +376,9 @@ export function useArchive() {
     isOpen, name, files, dirs, allDirs, totalSize, dirty, legacyNames, encoding,
     canUndo: computed(() => past.value.length > 0),
     canRedo: computed(() => future.value.length > 0),
+    docId: () => doc,
     open, create, close, reopenWithEncoding, undo, redo, children, exists,
-    addFiles, writeFile, mkdir, remove, rename, replaceWith, mergeFrom, generate, markSaved,
+    addFiles, writeFile, putResult, mkdir, remove, rename, replaceWith, mergeFrom, generate, markSaved,
   }
 }
 
