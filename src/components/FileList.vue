@@ -1,20 +1,20 @@
 <script setup lang="ts">
 import { computed, type Directive } from 'vue'
-import type { Row } from '../archive'
+import type { Change, Crumb, Row } from '../archive'
 import { kindOf } from '../kinds'
 import { fmtBytes, fmtDate } from '../util'
 import Icon, { type IconName } from './Icon.vue'
 
 const props = defineProps<{
   rows: Row[]
-  cwd: string
-  rootName: string
+  crumbs: Crumb[]
   selected: Set<string>
   active: string | null
   renaming: string | null
 }>()
 
 const emit = defineEmits<{
+  crumb: [c: Crumb]
   navigate: [path: string]
   open: [row: Row]
   toggle: [path: string]
@@ -26,17 +26,14 @@ const emit = defineEmits<{
   download: [row: Row]
 }>()
 
-const crumbs = computed(() => {
-  const out = [{ name: props.rootName, path: '' }]
-  let acc = ''
-  for (const part of props.cwd ? props.cwd.split('/') : []) {
-    acc = acc ? `${acc}/${part}` : part
-    out.push({ name: part, path: acc })
-  }
-  return out
-})
+// Deleted files are listed (struck out) but can't be selected.
+const selectable = computed(() => props.rows.filter((r) => !r.gone))
+const allSelected = computed(() => selectable.value.length > 0 && selectable.value.every((r) => props.selected.has(r.path)))
 
-const allSelected = computed(() => props.rows.length > 0 && props.rows.every((r) => props.selected.has(r.path)))
+const FILE_CHANGE: Record<Change, string> = { U: '新檔案', M: '已修改', D: '已刪除' }
+const FOLDER_CHANGE: Record<Change, string> = { U: '裡面有新檔案', M: '裡面有修改', D: '裡面有刪除的檔案' }
+const changeTitle = (row: Row) =>
+  row.dir ? (row.gone ? '已刪除的資料夾' : FOLDER_CHANGE[row.change!]) : FILE_CHANGE[row.change!]
 
 function icon(row: Row): IconName {
   if (row.dir) return 'folder'
@@ -74,10 +71,10 @@ function cancelRename() {
 <template>
   <div class="list">
     <nav class="crumbs" aria-label="資料夾路徑">
-      <template v-for="(c, i) in crumbs" :key="c.path">
+      <template v-for="(c, i) in crumbs" :key="`${c.depth}/${c.path}/${c.zip}`">
         <Icon v-if="i > 0" name="chevron" class="sep" />
-        <button type="button" class="crumb" :class="{ here: c.path === cwd }" @click="emit('navigate', c.path)">
-          <Icon v-if="i === 0" name="zip" />{{ c.name }}
+        <button type="button" class="crumb" :class="{ here: c.here }" @click="emit('crumb', c)">
+          <Icon v-if="c.zip" name="zip" />{{ c.name }}
         </button>
       </template>
     </nav>
@@ -94,8 +91,9 @@ function cancelRename() {
 
     <ul v-if="rows.length">
       <li v-for="row in rows" :key="row.path" class="row"
-          :class="{ active: row.path === active, picked: selected.has(row.path) }">
-        <label class="check">
+          :class="[row.change && `ch-${row.change}`, { active: row.path === active, picked: selected.has(row.path), gone: row.gone }]">
+        <span v-if="row.gone" class="check"></span>
+        <label v-else class="check">
           <input type="checkbox" :checked="selected.has(row.path)" @change="emit('toggle', row.path)"
                  :aria-label="`選取 ${row.name}`" />
         </label>
@@ -106,16 +104,19 @@ function cancelRename() {
                  @keydown.enter.prevent="commitRename(row, $event)" @keydown.esc.prevent="cancelRename"
                  @blur="commitRename(row, $event)" />
         </div>
-        <button v-else type="button" class="name" @click="row.dir ? emit('navigate', row.path) : emit('open', row)"
-                @dblclick.prevent="emit('startRename', row.path)" :title="row.path">
+        <button v-else type="button" class="name" :disabled="row.gone && !row.dir"
+                @click="row.dir ? emit('navigate', row.path) : emit('open', row)"
+                @dblclick.prevent="!row.gone && emit('startRename', row.path)" :title="row.path">
           <Icon :name="icon(row)" :class="{ folder: row.dir }" />
           <span class="label">{{ row.name }}</span>
-          <span v-if="row.dir" class="count">{{ row.count }} 個檔案</span>
+          <span v-if="row.dir && !row.gone" class="count">{{ row.count }} 個檔案</span>
+          <span v-if="row.change" class="mark" :title="changeTitle(row)">{{ row.dir ? '●' : row.change }}</span>
         </button>
 
         <span class="size">{{ fmtBytes(row.size) }}</span>
         <span class="date">{{ row.date ? fmtDate(row.date) : '' }}</span>
-        <span class="acts">
+        <span v-if="row.gone" class="acts"></span>
+        <span v-else class="acts">
           <button v-if="!row.dir" type="button" class="ib" title="下載這個檔案" @click="emit('download', row)">
             <Icon name="download" />
           </button>
@@ -165,6 +166,15 @@ ul { margin: 0; padding: 0; list-style: none; }
 .name .icon.folder { color: var(--folder); }
 .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .count { flex: none; color: var(--muted); font-size: 12px; }
+
+/* Changes since the last download or "確定": new green, modified orange, deleted red. */
+.mark { flex: none; margin-left: auto; font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ch-U .label, .ch-U .mark { color: var(--accent); }
+.ch-M .label, .ch-M .mark { color: var(--warn); }
+.ch-D .label, .ch-D .mark { color: var(--danger); }
+.row.gone .label { text-decoration: line-through; }
+.row.gone .icon, .row.gone .size, .row.gone .date { opacity: .55; }
+.name:disabled { cursor: default; }
 .rename {
   flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--accent); border-radius: 6px;
   background: var(--panel); color: var(--text); font: inherit; font-size: 16px; outline: none;

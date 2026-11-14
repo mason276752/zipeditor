@@ -68,6 +68,11 @@ h1 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
 .zipname:hover { border-color: var(--line); }
 .zipname:focus { border-color: var(--accent); background: var(--panel); outline: none; }
 .stats { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Changes since the last download or "確定", in the same colours as the U/M/D marks in the list. */
+.changes { display: inline-flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.changes .ch-U { color: var(--accent); }
+.changes .ch-M { color: var(--warn); }
+.changes .ch-D { color: var(--danger); }
 .badge { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); font-size: 12px; font-weight: 600; }
 
 /* ---------- buttons ---------- */
@@ -82,6 +87,7 @@ h1 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn:disabled { opacity: .45; pointer-events: none; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn .clip { max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
 .btn.danger:hover { border-color: var(--danger); color: var(--danger); }
 .btn.icon { min-width: 38px; padding: 7px; }

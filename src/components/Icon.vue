@@ -27,6 +27,7 @@ const PATHS = {
   send: 'M5 12h13M13 6l6 6-6 6',
   zip: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5M11 4v2M11 8v2M11 12v2M10 16h2v3h-2z',
   inbox: 'M4 13l2-8h12l2 8M4 13v6h16v-6M4 13h5l1 2h4l1-2h5',
+  saveUp: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5M12 18v-7M9 14l3-3 3 3',
 }
 export type IconName = keyof typeof PATHS
 </script>

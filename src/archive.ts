@@ -9,6 +9,10 @@ export interface FileEntry {
   source: Blob | JSZip.JSZipObject
 }
 
+// What happened to a file since the zip was last downloaded or the changes were accepted:
+// U new, M modified, D deleted.
+export type Change = 'U' | 'M' | 'D'
+
 export interface Row {
   path: string
   name: string
@@ -17,6 +21,19 @@ export interface Row {
   date: Date | null
   count: number // files inside, for folders
   entry?: FileEntry
+  // For a file, what happened to it; for a folder, what happened inside (M when mixed).
+  change?: Change
+  // Only in the baseline: a deleted file, or a folder that no longer exists. Shown struck out.
+  gone?: boolean
+}
+
+// One step of the path above the file list: a zip (the open one, or one it sits inside) or a folder.
+export interface Crumb {
+  name: string
+  depth: number // which zip: 0 is the outermost
+  path: string // folder within that zip, '' for its root
+  zip: boolean
+  here: boolean
 }
 
 export type NameEncoding = 'auto' | 'utf-8' | 'gb18030' | 'big5' | 'shift_jis'
@@ -27,6 +44,24 @@ interface Snapshot {
   label: string
   mergeKey?: string
 }
+
+// Everything about an open zip, set aside while a zip inside it is open (see suspend / resume).
+export interface ArchiveState {
+  name: string
+  files: Map<string, FileEntry>
+  dirs: Set<string>
+  dirty: boolean
+  legacyNames: boolean
+  encoding: NameEncoding
+  past: Snapshot[]
+  future: Snapshot[]
+  baseFiles: Map<string, FileEntry>
+  baseDirs: Set<string>
+  original: Blob | null
+  doc: number
+}
+
+let docs = 0 // ids for opened zips, never reused, so a late tool result can't land in the wrong one
 
 const HISTORY_LIMIT = 100
 // Root collation: digits and Latin before CJK, like most file managers; "2" before "10".
@@ -122,8 +157,11 @@ export function useArchive() {
   const encoding = ref<NameEncoding>('auto')
   const past = shallowRef<Snapshot[]>([])
   const future = shallowRef<Snapshot[]>([])
+  // The state at the last download (or open, or "accept"): changes are shown against it.
+  const baseFiles = shallowRef(new Map<string, FileEntry>())
+  const baseDirs = shallowRef(new Set<string>())
   let original: Blob | null = null // the zip as opened, for re-reading with another name encoding
-  let doc = 0 // changes whenever another zip is opened, so late results from other tools can't land in it
+  let doc = 0 // which zip this is (see `docs`)
 
   const allDirs = computed(() => {
     const out = new Set(dirs.value)
@@ -136,8 +174,45 @@ export function useArchive() {
     return n
   })
 
+  // An entry is modified when its content was replaced. Renames keep the content but count as
+  // deleted + new, like git without rename detection.
+  const changes = computed(() => {
+    const out = new Map<string, Change>()
+    for (const [p, f] of files.value) {
+      const b = baseFiles.value.get(p)
+      if (!b) out.set(p, 'U')
+      else if (b.source !== f.source) out.set(p, 'M')
+    }
+    for (const p of baseFiles.value.keys()) if (!files.value.has(p)) out.set(p, 'D')
+    return out
+  })
+  // Folders that came or went with no files in them (made with 新資料夾, or removed while empty).
+  // Folders with files are already covered by their files' changes.
+  const dirChanges = computed(() => {
+    const out = new Map<string, Change>()
+    const now = new Set([...files.value.keys()].flatMap(ancestors))
+    const before = new Set([...baseFiles.value.keys()].flatMap(ancestors))
+    for (const d of allDirs.value) if (!baseDirs.value.has(d) && !now.has(d)) out.set(d, 'U')
+    for (const d of baseDirs.value) if (!allDirs.value.has(d) && !before.has(d)) out.set(d, 'D')
+    return out
+  })
+  const changeCount = computed(() => {
+    const n = { U: 0, M: 0, D: 0, total: 0 }
+    for (const c of [...changes.value.values(), ...dirChanges.value.values()]) {
+      n[c]++
+      n.total++
+    }
+    return n
+  })
+
+  // Makes the current state the baseline, so nothing shows as changed.
+  function acceptChanges() {
+    baseFiles.value = files.value
+    baseDirs.value = new Set(allDirs.value)
+  }
+
   function reset(next: { files: Map<string, FileEntry>; dirs: Set<string> }, zipName: string) {
-    doc++
+    doc = ++docs
     files.value = next.files
     dirs.value = next.dirs
     name.value = zipName
@@ -145,6 +220,7 @@ export function useArchive() {
     future.value = []
     dirty.value = false
     isOpen.value = true
+    acceptChanges()
   }
 
   async function open(blob: Blob, zipName: string, enc: NameEncoding = 'auto') {
@@ -166,7 +242,7 @@ export function useArchive() {
   }
 
   function close() {
-    doc++
+    doc = ++docs
     original = null
     isOpen.value = false
     files.value = new Map()
@@ -174,6 +250,7 @@ export function useArchive() {
     past.value = []
     future.value = []
     dirty.value = false
+    acceptChanges()
   }
 
   // Consecutive commits with the same `mergeKey` (a tool syncing its results back) undo as one step.
@@ -226,16 +303,38 @@ export function useArchive() {
       const rest = f.path.slice(prefix.length)
       const slash = rest.indexOf('/')
       if (slash < 0) {
-        out.push({ path: f.path, name: rest, dir: false, size: f.size, date: f.date, count: 0, entry: f })
+        out.push({ path: f.path, name: rest, dir: false, size: f.size, date: f.date, count: 0, entry: f, change: changes.value.get(f.path) })
       } else {
         const row = folderRow(rest.slice(0, slash))
         row.size += f.size
         row.count++
       }
     }
-    for (const d of allDirs.value) {
-      if (d.startsWith(prefix) && d.length > prefix.length && !d.slice(prefix.length).includes('/')) {
-        folderRow(d.slice(prefix.length))
+    const isChild = (d: string) => d.startsWith(prefix) && d.length > prefix.length && !d.slice(prefix.length).includes('/')
+    for (const d of allDirs.value) if (isChild(d)) folderRow(d.slice(prefix.length))
+    const existing = new Set(folders.keys())
+
+    // Changes since the baseline: deleted files stay listed until accepted, and a folder shows
+    // what happened inside it (a new empty folder counts as new).
+    for (const [p, c] of changes.value) {
+      if (!p.startsWith(prefix)) continue
+      const rest = p.slice(prefix.length)
+      const slash = rest.indexOf('/')
+      if (slash >= 0) {
+        const row = folderRow(rest.slice(0, slash))
+        row.change = row.change && row.change !== c ? 'M' : c
+      } else if (c === 'D') {
+        const b = baseFiles.value.get(p)!
+        out.push({ path: p, name: rest, dir: false, size: b.size, date: b.date, count: 0, change: 'D', gone: true })
+      }
+    }
+    for (const d of baseDirs.value) if (isChild(d)) folderRow(d.slice(prefix.length))
+    for (const [child, row] of folders) {
+      if (!existing.has(child)) {
+        row.gone = true
+        row.change = 'D'
+      } else if (!row.change && !baseDirs.value.has(row.path)) {
+        row.change = 'U'
       }
     }
     const cmp = (a: Row, b: Row) => collator.compare(a.name, b.name)
@@ -267,10 +366,35 @@ export function useArchive() {
     commit(f, dirs.value, label, mergeKey)
   }
 
-  function writeFile(path: string, blob: Blob) {
+  function writeFile(path: string, blob: Blob, label = `編輯「${baseName(path)}」`) {
     const f = new Map(files.value)
     f.set(path, { path, size: blob.size, date: new Date(), source: blob })
-    commit(f, dirs.value, `編輯「${baseName(path)}」`)
+    commit(f, dirs.value, label)
+  }
+
+  // The whole state of the open zip, to put back with `resume` (a zip inside it is opened meanwhile).
+  function suspend(): ArchiveState {
+    return {
+      name: name.value, files: files.value, dirs: dirs.value, dirty: dirty.value, legacyNames: legacyNames.value,
+      encoding: encoding.value, past: past.value, future: future.value, baseFiles: baseFiles.value,
+      baseDirs: baseDirs.value, original, doc,
+    }
+  }
+
+  function resume(s: ArchiveState) {
+    name.value = s.name
+    files.value = s.files
+    dirs.value = s.dirs
+    dirty.value = s.dirty
+    legacyNames.value = s.legacyNames
+    encoding.value = s.encoding
+    past.value = s.past
+    future.value = s.future
+    baseFiles.value = s.baseFiles
+    baseDirs.value = s.baseDirs
+    original = s.original
+    doc = s.doc
+    isOpen.value = true
   }
 
   function mkdir(path: string) {
@@ -370,14 +494,15 @@ export function useArchive() {
 
   function markSaved() {
     dirty.value = false
+    acceptChanges()
   }
 
   return {
-    isOpen, name, files, dirs, allDirs, totalSize, dirty, legacyNames, encoding,
+    isOpen, name, files, dirs, allDirs, totalSize, dirty, legacyNames, encoding, changes, changeCount, acceptChanges,
     canUndo: computed(() => past.value.length > 0),
     canRedo: computed(() => future.value.length > 0),
     docId: () => doc,
-    open, create, close, reopenWithEncoding, undo, redo, children, exists,
+    open, create, close, reopenWithEncoding, suspend, resume, undo, redo, children, exists,
     addFiles, writeFile, putResult, mkdir, remove, rename, replaceWith, mergeFrom, generate, markSaved,
   }
 }
