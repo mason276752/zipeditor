@@ -11,6 +11,7 @@
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@zip.js/zip.js": "2.24.0",
     "heic-to": "^1.6.7",
     "jszip": "^3.10.2",
     "vue": "^3.5.45"

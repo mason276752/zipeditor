@@ -87,6 +87,7 @@ h1 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn:disabled { opacity: .45; pointer-events: none; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.locked { border-color: var(--accent); color: var(--accent); }
 .btn .clip { max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
 .btn.danger:hover { border-color: var(--danger); color: var(--danger); }

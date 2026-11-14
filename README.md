@@ -12,6 +12,8 @@
 - **整理**：新增檔案／資料夾、新文字檔、新資料夾、重新命名、刪除、多選刪除；名稱裡打 `/` 可以搬到別的資料夾（`/` 開頭代表從根目錄算起）
 - **復原／重做**：所有操作都能復原（`⌘Z`、`⌘⇧Z`）
 - **變更標示**：上次下載之後新增、修改、刪除的檔案，分別以綠色 U、橘色 M、紅色 D 標示（刪除的檔案留在清單裡劃掉），資料夾用圓點表示裡面有變更；上方列出各有幾個。下載或按「確定」後恢復一般顏色（「確定」不會下載）
+- **還原、比較**：U、M、D 的檔案（或整個資料夾、或全部）都可以還原成上次下載時的樣子，還原本身也能復原。修改過的檔案可以和原檔並排比較：文字檔顯示逐行差異，圖片並排，音檔、影片、PDF 各放一份；工具改了副檔名的檔案（photo.png → photo.jpg）也算同一個檔案
+- **密碼**：有密碼的 ZIP（AES 或傳統 ZipCrypto）輸入密碼就能開，ZIP 裡有密碼的 ZIP 也一樣；下載、存回時沿用原本的密碼。也可以替 ZIP 設定、修改、移除密碼，加密方式可選 AES-256（安全，但 Windows／macOS 內建的解壓縮打不開）或傳統 ZipCrypto（系統內建就能解，但容易被破解）。有密碼的 PDF 由瀏覽器內建的 PDF 檢視器詢問密碼
 - **ZIP 裡的 ZIP**：點一下就打開編輯，路徑列會顯示外層。按「存回」用選擇的壓縮程度重新打包、寫回外層（在外層是一個可以復原的修改）；直接回到外層時有修改也會先存回。「下載 ZIP」下載目前這一層
 - **重新打包**：可選不壓縮／標準／最大壓縮；沒動過的檔案會直接沿用原本壓縮好的資料，大 ZIP 也很快
 - **中文檔名**：沒有 UTF-8 標記的舊式 ZIP 會自動嘗試 GBK，也可以手動切換 Big5、Shift_JIS
@@ -29,7 +31,7 @@
 | ZIP 編輯器 | [removebg](https://github.com/mason276752/removebg) | 勾選圖片或在預覽裡按「去背」，把圖片送去 AI 去背 |
 | ZIP 編輯器 | [audiospeed](https://github.com/mason276752/audiospeed) | 勾選音檔或在預覽裡按「音檔變速」，把音檔送去加快／放慢（音高不變） |
 | ZIP 編輯器 | [pdfcompress](https://github.com/mason276752/pdfcompress) | 勾選 PDF 或在預覽裡按「PDF 壓縮」，把 PDF 送去縮小裡面的圖片 |
-| paste2jpg、upscale、removebg、audiospeed、pdfcompress | ZIP 編輯器 | 從這裡傳過去的檔案，處理好、之後每次修改都會**自動傳回**，放在原檔旁邊；同一份結果的新版本取代舊的（例如 PNG 改成 WebP），連續傳回的更新一次就能復原。換開別的 ZIP 之後才傳回的結果不會放進來 |
+| paste2jpg、upscale、removebg、audiospeed、pdfcompress | ZIP 編輯器 | 從這裡傳過去的檔案，處理好、之後每次修改都會**自動傳回並覆蓋原檔**，副檔名不同時一併改名（例如 photo.png → photo.jpg）。在清單裡標成 M，可以比較原檔、還原；連續傳回的更新一次就能復原。換開別的 ZIP 之後才傳回的結果不會放進來 |
 | paste2jpg、upscale、removebg、audiospeed、pdfcompress | ZIP 編輯器 | 「傳到 ZIP 編輯器」把全部結果打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
 | upscale | removebg | 「傳到去背」把放大後的圖直接交給去背，不經過 ZIP 編輯器 |
 | removebg | upscale、paste2jpg | 「傳到圖片放大」「傳到 Paste → JPG」把去背圖直接交過去（Paste → JPG 選 WebP 會保留透明） |
@@ -51,7 +53,7 @@
 
 `replyTo: {app, to}` 請對方把處理結果傳回 `app` channel 上的 `to` 分頁，而不是直接下載；回傳的訊息帶 `inReplyTo` 對應原本的 `id`。對方 3 秒內沒回條就改成下載。
 
-`origins[i]: {app, to, key}` 是 `files[i]` 的來源（這裡的 `key` 是「哪一份 ZIP＋檔案路徑」）。工具每次做出或改動這個檔案的結果，就送 `{type:'update', key, output, file}` 回那個分頁；`output` 是這份結果的代號，同一個代號的新版本會取代舊的（檔名變了也會換掉舊檔）。工具把檔案再轉給別的工具時 `origins` 跟著傳過去，所以結果一樣回到這裡。工具那邊對同一份結果會防抖、節流（停手 0.8 秒才傳最新版，一直改也至少每 3 秒傳一次），這裡則把同一個工具連續傳回的更新併成一個復原步驟。
+`origins[i]: {app, to, key}` 是 `files[i]` 的來源（這裡的 `key` 是「哪一份 ZIP＋檔案路徑」）。工具每次做出或改動這個檔案的結果，就送 `{type:'update', key, output, file}` 回那個分頁；這裡會用結果覆蓋原檔：檔名沿用原檔、副檔名換成 `file` 的（`output` 是工具那邊這份結果的代號，這裡用不到）。工具把檔案再轉給別的工具時 `origins` 跟著傳過去，所以結果一樣回到這裡。工具那邊對同一份結果會防抖、節流（停手 0.8 秒才傳最新版，一直改也至少每 3 秒傳一次），這裡則把同一個工具連續傳回的更新併成一個復原步驟。
 
 ## 開發
 
@@ -67,6 +69,6 @@ npm run build      # 型別檢查 + 輸出到 dist/
 
 ## 授權
 
-使用 [Vue](https://vuejs.org/)（MIT）與 [JSZip](https://stuk.github.io/jszip/)（MIT／GPLv3 雙授權，此處採 MIT）。
+使用 [Vue](https://vuejs.org/)（MIT）與 [JSZip](https://stuk.github.io/jszip/)（MIT／GPLv3 雙授權，此處採 MIT）。有密碼的 ZIP 用 [zip.js](https://github.com/gildas-lormeau/zip.js)（BSD-3-Clause）讀寫，打包成獨立的檔案，只在遇到或設定密碼時載入。
 
 HEIF 預覽用 [heic-to](https://github.com/hoppergee/heic-to)（內含 [libheif](https://github.com/strukturag/libheif)，LGPL-3.0）：未修改，打包成獨立的檔案，只在瀏覽器無法原生顯示 HEIF 時載入；授權全文隨網站發布在 `heic-to.LICENSE`。

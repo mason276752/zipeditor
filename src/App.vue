@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
-  baseName, joinPath, normalizePath, parentOf, readEntry, useArchive,
-  type ArchiveState, type Crumb, type FileEntry, type NameEncoding, type Row,
+  baseName, joinPath, normalizePath, parentOf, PasswordError, readEntry, useArchive,
+  type ArchiveState, type Crumb, type FileEntry, type NameEncoding, type Protection, type Row,
 } from './archive'
 import {
   bridgeSupported, FILE_TOOLS, listen, newId, replyAddress, send, toolLabel, TOOLS,
@@ -12,10 +12,12 @@ import { kindOf, mimeOf } from './kinds'
 import { droppedFiles, fmtBytes, pickedFiles, saveBlob, timeStamp, type Picked } from './util'
 import FileList from './components/FileList.vue'
 import PreviewPane from './components/PreviewPane.vue'
+import PasswordDialog from './components/PasswordDialog.vue'
 import Icon from './components/Icon.vue'
 
 const archive = useArchive()
-const { isOpen, name, files, allDirs, totalSize, dirty, changeCount, legacyNames, encoding, canUndo, canRedo } = archive
+const { isOpen, name, files, allDirs, totalSize, dirty, changeCount, legacyNames, encoding, protection, canUndo, canRedo } = archive
+const pwDialog = ref<InstanceType<typeof PasswordDialog>>()
 
 const cwd = ref('')
 const selected = ref(new Set<string>())
@@ -34,6 +36,8 @@ const dirInput = ref<HTMLInputElement>()
 
 const rows = computed(() => archive.children(cwd.value))
 const activeEntry = computed(() => (activePath.value && files.value.get(activePath.value)) || null)
+const activeChange = computed(() => (activePath.value ? archive.changes.value.get(activePath.value) : undefined))
+const activeBase = computed(() => (activeChange.value === 'M' ? archive.baseOf(activePath.value!) ?? null : null))
 const selectedRows = computed(() => rows.value.filter((r) => selected.value.has(r.path)))
 const selectedOfKind = (k: FileKind) => selectedRows.value.filter((r) => !r.dir && kindOf(r.name) === k)
 const selectedByKind = computed(() =>
@@ -100,9 +104,25 @@ async function openZip(file: Blob, fileName: string, nested = false) {
   try {
     await archive.open(file, fileName)
   } catch (err) {
-    console.warn('open failed', err)
-    toast(`無法開啟「${fileName}」：不是有效的 ZIP 檔`)
-    return false
+    if (!(err instanceof PasswordError)) {
+      console.warn('open failed', err)
+      toast(`無法開啟「${fileName}」：不是有效的 ZIP 檔`)
+      return false
+    }
+    // Encrypted: each try opens it again; a wrong password keeps the dialog up.
+    const answer = await pwDialog.value!.ask({
+      mode: 'open',
+      title: `「${fileName}」有密碼`,
+      check: async (password) => {
+        try {
+          await archive.open(file, fileName, 'auto', password)
+          return ''
+        } catch (e) {
+          return e instanceof PasswordError ? '密碼不對，請再試一次' : '無法開啟：檔案可能已損壞'
+        }
+      },
+    })
+    if (!answer) return false
   }
   if (!nested) levels.value = []
   resetView()
@@ -137,16 +157,16 @@ interface Level {
   outer: ArchiveState
   path: string
   cwd: string
-  saved: { files: Map<string, FileEntry>; dirs: Set<string> } // the inner zip as last written back
+  saved: { files: Map<string, FileEntry>; dirs: Set<string>; protection: Protection | null } // as last written back
 }
 const levels = shallowRef<Level[]>([])
 const parentName = computed(() => levels.value.at(-1)?.outer.name ?? '')
 const isZipRow = (row: Row) => !row.dir && !row.gone && /\.zip$/i.test(row.name)
-const savedState = () => ({ files: files.value, dirs: archive.dirs.value })
+const savedState = () => ({ files: files.value, dirs: archive.dirs.value, protection: protection.value })
 // Every change makes new maps, so undoing back to how the zip was opened counts as nothing to save.
 const unsavedInParent = computed(() => {
   const l = levels.value.at(-1)
-  return !!l && (l.saved.files !== files.value || l.saved.dirs !== archive.dirs.value)
+  return !!l && (l.saved.files !== files.value || l.saved.dirs !== archive.dirs.value || l.saved.protection !== protection.value)
 })
 const patchLevel = (i: number, patch: Partial<Level>) => {
   levels.value = levels.value.map((l, j) => (j === i ? { ...l, ...patch } : l))
@@ -219,6 +239,16 @@ async function leaveZip() {
 async function leaveTo(depth: number, path: string) {
   while (levels.value.length > depth) if (!(await leaveZip())) return
   cwd.value = path
+}
+
+// ---------- password ----------
+async function editPassword() {
+  const current = protection.value
+  const answer = await pwDialog.value!.ask({ mode: 'set', title: current ? '修改密碼' : '設定密碼', current })
+  if (!answer || (answer !== 'remove' && answer.password === current?.password && answer.encryption === current.encryption)) return
+  archive.setProtection(answer === 'remove' ? null : answer)
+  const when = levels.value.length ? '下載、存回' : '下載'
+  toast(answer === 'remove' ? `已移除密碼，${when}時不加密` : `已設定密碼（${answer.encryption === 'aes' ? 'AES-256' : 'ZipCrypto'}），${when}時會加密`)
 }
 
 function onCrumb(c: Crumb) {
@@ -345,6 +375,28 @@ function saveText(blob: Blob) {
   toast('已儲存')
 }
 
+// ---------- reverting ----------
+// Back to how things were at the last download or 確定: new files go, changed ones get their
+// original content (and name) back, deleted ones return. Undoable like any other change.
+function revertPaths(paths: string[], what: string) {
+  if (!paths.length || !confirmDiscardEdits()) return
+  archive.revert(paths, `還原${what}`)
+  editorDirty.value = false
+  toast(`已還原${what}`, undoAction)
+}
+const revertRow = (row: Row) => revertPaths([row.path], `「${row.name}」`)
+function revertActive() {
+  const path = activePath.value
+  if (!path) return
+  const base = archive.baseOf(path)
+  revertPaths([path], `「${baseName(path)}」`)
+  if (base && !editorDirty.value) activePath.value = base.path
+}
+function revertSelected() {
+  const list = selectedRows.value.filter((r) => r.change)
+  revertPaths(list.map((r) => r.path), list.length === 1 ? `「${list[0].name}」` : ` ${list.length} 個項目`)
+}
+
 function toggle(path: string) {
   if (!selected.value.delete(path)) selected.value.add(path)
 }
@@ -406,7 +458,7 @@ async function convert() {
     type: 'zip',
     id,
     // No point deflating for a hop to another tab; it repacks the zip anyway.
-    file: new File([await archive.generate(0)], zipFileName.value, { type: 'application/zip' }),
+    file: new File([await archive.generate(0, undefined, false)], zipFileName.value, { type: 'application/zip' }),
     replyTo: replyAddress,
   }))
   if (result !== 'sent' && pendingConvert.value === id) {
@@ -416,8 +468,8 @@ async function convert() {
 }
 
 // Images go to paste2jpg / upscale / removebg, audio to audiospeed, PDFs to pdfcompress. Each file
-// carries its origin, so the tool sends every result (and every later change to it) straight back:
-// see onUpdate.
+// carries its origin, so the tool sends every result (and every later change to it) straight back
+// to overwrite it: see onUpdate.
 async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
   if (!list.length) return
   const doc = archive.docId()
@@ -430,13 +482,22 @@ async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
     origins: list.map((r) => ({ ...replyAddress, key: `${doc}\n${r.path}` })),
   }))
   const label = TOOLS[target].label
-  if (result === 'sent') toast(`已傳送 ${list.length} ${KIND_UNIT[kind]}到${label}，處理好會自動放回原檔旁邊`)
+  if (result === 'sent') toast(`已傳送 ${list.length} ${KIND_UNIT[kind]}到${label}，處理好會直接覆蓋原檔`)
   else reportFailure(result, target)
 }
 
-// Where each tool result went, by `${doc}\n${from}\n${output}`, so a newer version of a result
-// replaces the older one even after its name changed (e.g. PNG → WebP).
+// Where each file sent to a tool is now, by `${doc}\n${source}`. A result overwrites it, renamed
+// when the extension changes, so later results (or another tool's) follow it.
 const resultPaths = new Map<string, string>()
+
+// The original name with the result's extension: photo.png + photo-4x.webp → photo.webp.
+function resultName(source: string, result: string) {
+  const dot = (n: string) => (n.lastIndexOf('.') > 0 ? n.lastIndexOf('.') : n.length)
+  const name = baseName(source)
+  const own = name.slice(dot(name))
+  const ext = result.slice(dot(result))
+  return name.slice(0, dot(name)) + (own.toLowerCase() === ext.toLowerCase() ? own : ext)
+}
 
 function onUpdate(u: ResultUpdate) {
   const cut = u.key.indexOf('\n')
@@ -449,31 +510,30 @@ function onUpdate(u: ResultUpdate) {
     toast(`「${label}」傳回的 ${u.file.name} 沒有放進來：原本的 ZIP 已經關掉或換掉了`)
     return
   }
-  const name = u.file.name.replace(/[\\/]/g, '_') || 'result'
-  const id = `${doc}\n${u.from}\n${u.output}`
-  const prev = resultPaths.get(id)
-  let path = prev && baseName(prev) === name ? prev : ''
-  if (!path) {
-    // Next to the original, numbered if another result already took that name.
-    const taken = new Set([...resultPaths].filter(([k]) => k !== id && k.startsWith(`${doc}\n`)).map(([, p]) => p))
-    const dot = name.lastIndexOf('.')
-    const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
-    path = uniquePath(parentOf(source), stem, ext, (p) => taken.has(p))
+  const key = `${doc}\n${source}`
+  const write = () => {
+    const at = resultPaths.get(key) ?? source
+    const name = resultName(source, u.file.name.replace(/[\\/]/g, '_'))
+    let path = joinPath(parentOf(at), name)
+    if (path !== at && archive.exists(path)) {
+      const dot = name.lastIndexOf('.')
+      path = uniquePath(parentOf(at), dot > 0 ? name.slice(0, dot) : name, dot > 0 ? name.slice(dot) : '')
+    }
+    archive.putResult(path, u.file, at, `「${label}」修改了「${baseName(source)}」`, `result:${u.from}`)
+    resultPaths.set(key, path)
+    return path
   }
-  if (outerIndex >= 0) {
-    const inner = archive.suspend()
-    archive.resume(levels.value[outerIndex].outer)
-    archive.putResult(path, u.file, prev, `「${label}」傳回的結果`, `result:${u.from}`)
-    const outer = archive.suspend()
-    archive.resume(inner)
-    patchLevel(outerIndex, { outer })
-    resultPaths.set(id, path)
-    toast(`已${prev ? '更新' : '放入'}「${levels.value[outerIndex].outer.name}」裡的「${path}」（${label}）`)
+  if (outerIndex < 0) {
+    toast(`「${label}」更新了「${write()}」`, undoAction)
     return
   }
-  archive.putResult(path, u.file, prev, `「${label}」傳回的結果`, `result:${u.from}`)
-  resultPaths.set(id, path)
-  toast(`已${prev ? '更新' : '放入'}「${path}」（${label}）`, undoAction)
+  const inner = archive.suspend()
+  archive.resume(levels.value[outerIndex].outer)
+  const path = write()
+  const outer = archive.suspend()
+  archive.resume(inner)
+  patchLevel(outerIndex, { outer })
+  toast(`「${label}」更新了「${levels.value[outerIndex].outer.name}」裡的「${path}」`)
 }
 
 function sendActive(target: Tool) {
@@ -633,6 +693,8 @@ onBeforeUnmount(() => {
           <span v-if="changeCount.U" class="ch-U">新增 {{ changeCount.U }}</span>
           <span v-if="changeCount.M" class="ch-M">修改 {{ changeCount.M }}</span>
           <span v-if="changeCount.D" class="ch-D">刪除 {{ changeCount.D }}</span>
+          <button type="button" class="btn small" title="全部換回上次下載（或確定）時的樣子，可以再復原"
+                  @click="revertPaths([''], '全部變更')">全部還原</button>
           <button type="button" class="btn small" title="把目前的狀態當成基準，標記變回一般顏色（不會下載）"
                   @click="archive.acceptChanges()">確定</button>
         </span>
@@ -657,10 +719,11 @@ onBeforeUnmount(() => {
           <li><strong>編輯</strong>：文字檔（程式碼、設定檔、字幕、Markdown…）可以直接修改並儲存回 ZIP。</li>
           <li><strong>整理</strong>：新增、刪除、重新命名檔案與資料夾；名稱裡打「/」可以搬到別的資料夾。所有操作都能復原（⌘Z）。</li>
           <li><strong>重新打包</strong>：選擇壓縮程度後下載；沒動過的檔案會沿用原本壓縮好的資料，大 ZIP 也很快。</li>
+          <li><strong>密碼</strong>：有密碼的 ZIP（AES 或傳統 ZipCrypto）輸入密碼就能開；也可以替 ZIP 設定密碼再下載。</li>
           <li><strong>ZIP 裡的 ZIP</strong>：點一下就打開來編輯，改好按「存回」（或直接回到外層）就寫回外面的 ZIP；也可以單獨下載裡面這個 ZIP。</li>
-          <li><strong>看得到改了什麼</strong>：新增、修改、刪除的檔案分別標成綠色 U、橘色 M、紅色 D，下載或按「確定」後恢復。</li>
+          <li><strong>看得到改了什麼</strong>：新增、修改、刪除的檔案分別標成綠色 U、橘色 M、紅色 D，每一個都能還原；修改過的可以和原檔比較，文字檔還看得到逐行差異。下載或按「確定」後恢復。</li>
           <li><strong>中文檔名</strong>：Windows 做的 GBK／Big5 編碼 ZIP 也能正確顯示檔名。</li>
-          <li><strong>串接其他工具</strong>：可以把 ZIP 傳到<a href="../ziptotaiwanzip/">簡繁轉換工具</a>轉換後自動傳回來；圖片可以傳到 <a href="../paste2jpg/">Paste → JPG</a> 壓縮、<a href="../upscale/">圖片放大</a>、<a href="../removebg/">去背</a>，音檔可以傳到<a href="../audiospeed/">音檔變速</a>，處理好的結果都能直接傳回來。</li>
+          <li><strong>串接其他工具</strong>：可以把 ZIP 傳到<a href="../ziptotaiwanzip/">簡繁轉換工具</a>轉換後自動傳回來；圖片可以傳到 <a href="../paste2jpg/">Paste → JPG</a> 壓縮、<a href="../upscale/">圖片放大</a>、<a href="../removebg/">去背</a>，音檔可以傳到<a href="../audiospeed/">音檔變速</a>，處理好的結果會直接覆蓋原檔。</li>
         </ul>
       </section>
     </template>
@@ -682,6 +745,10 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="group end">
+          <button type="button" class="btn" :class="{ locked: protection }" @click="editPassword"
+                  :title="protection ? `下載${levels.length ? '、存回' : ''}時用密碼加密（${protection.encryption === 'aes' ? 'AES-256' : 'ZipCrypto'}），按這裡修改或移除` : '設定密碼：下載時加密'">
+            <Icon name="lock" /><span>{{ protection ? '有密碼' : '密碼' }}</span>
+          </button>
           <select v-model.number="level" aria-label="壓縮程度" title="壓縮程度">
             <option :value="0">不壓縮</option>
             <option :value="6">標準壓縮</option>
@@ -737,6 +804,8 @@ onBeforeUnmount(() => {
             </button>
           </span>
         </template>
+        <button v-if="selectedRows.some((r) => r.change)" type="button" class="btn small" title="選取的項目換回上次下載（或確定）時的樣子"
+                @click="revertSelected"><Icon name="undo" />還原</button>
         <button type="button" class="btn small danger" @click="remove(selectedRows)"><Icon name="trash" />刪除</button>
         <button type="button" class="btn small" @click="selected.clear()">取消選取</button>
       </div>
@@ -746,8 +815,9 @@ onBeforeUnmount(() => {
                   :active="activePath" :renaming="renaming" @crumb="onCrumb"
                   @navigate="navigate" @open="openRow" @toggle="toggle" @toggle-all="toggleAll"
                   @start-rename="(p) => (renaming = p)" @rename="rename" @cancel-rename="renaming = null"
-                  @remove="(r) => remove([r])" @download="downloadRow" />
+                  @remove="(r) => remove([r])" @download="downloadRow" @revert="revertRow" />
         <PreviewPane v-if="activeEntry" :entry="activeEntry" :can-send="bridgeSupported"
+                     :change="activeChange" :base="activeBase" @revert="revertActive"
                      @close="closePreview" @save="saveText" @dirty="(d) => (editorDirty = d)"
                      @download="downloadRow(entryRow(activeEntry))"
                      @rename="renaming = activeEntry.path" @remove="removeActive" @send="sendActive" />
@@ -765,6 +835,7 @@ onBeforeUnmount(() => {
       <button v-if="toastAction" type="button" @click="toastAction.run(); toastMsg = ''">{{ toastAction.label }}</button>
     </div>
 
+    <PasswordDialog ref="pwDialog" />
     <input ref="zipInput" type="file" accept=".zip,application/zip" hidden @change="onPickZip" />
     <input ref="filesInput" type="file" multiple hidden @change="onPickFiles(filesInput)" />
     <input ref="dirInput" type="file" hidden @change="onPickFiles(dirInput)" />

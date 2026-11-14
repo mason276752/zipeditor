@@ -2,6 +2,9 @@ import JSZip from 'jszip'
 import { computed, ref, shallowRef } from 'vue'
 
 export interface FileEntry {
+  // Which file this is, kept through renames and through a tool overwriting it, so changes are
+  // matched against the original even when the name changed (photo.png → photo.jpg).
+  id: number
   path: string
   size: number
   date: Date
@@ -12,6 +15,9 @@ export interface FileEntry {
 // What happened to a file since the zip was last downloaded or the changes were accepted:
 // U new, M modified, D deleted.
 export type Change = 'U' | 'M' | 'D'
+
+let ids = 0
+const newEntryId = () => ++ids
 
 export interface Row {
   path: string
@@ -25,6 +31,8 @@ export interface Row {
   change?: Change
   // Only in the baseline: a deleted file, or a folder that no longer exists. Shown struck out.
   gone?: boolean
+  // For a modified or deleted file, how it was at the baseline (its name may have been different).
+  base?: FileEntry
 }
 
 // One step of the path above the file list: a zip (the open one, or one it sits inside) or a folder.
@@ -45,6 +53,17 @@ interface Snapshot {
   mergeKey?: string
 }
 
+// A password the zip is saved with. AES-256 is safe but needs 7-Zip or similar; the traditional
+// ZipCrypto opens in Windows and macOS out of the box but is easy to break.
+export type Encryption = 'aes' | 'zipcrypto'
+export interface Protection {
+  password: string
+  encryption: Encryption
+}
+
+// The zip is encrypted and no password was given, or the one given is wrong.
+export class PasswordError extends Error {}
+
 // Everything about an open zip, set aside while a zip inside it is open (see suspend / resume).
 export interface ArchiveState {
   name: string
@@ -58,6 +77,7 @@ export interface ArchiveState {
   baseFiles: Map<string, FileEntry>
   baseDirs: Set<string>
   original: Blob | null
+  protection: Protection | null
   doc: number
 }
 
@@ -106,7 +126,17 @@ function knownSize(obj: JSZip.JSZipObject): number | null {
   return typeof size === 'number' ? size : null
 }
 
-export async function readZip(blob: Blob, encoding: NameEncoding = 'auto') {
+// JSZip can't decrypt, so password-protected zips go through zip.js (loaded only for them).
+export async function readZip(blob: Blob, encoding: NameEncoding = 'auto', password?: string) {
+  try {
+    return { ...(await readPlainZip(blob, encoding)), protection: null }
+  } catch (err) {
+    if (!/encrypted/i.test(String((err as Error)?.message))) throw err
+  }
+  return readEncryptedZip(blob, encoding, password)
+}
+
+async function readPlainZip(blob: Blob, encoding: NameEncoding) {
   let legacyNames = false // a name without the UTF-8 flag that isn't plain ASCII
   const zip = await JSZip.loadAsync(blob, {
     decodeFileName: (raw) => {
@@ -127,9 +157,40 @@ export async function readZip(blob: Blob, encoding: NameEncoding = 'auto') {
       continue
     }
     const size = knownSize(obj) ?? (await obj.async('uint8array')).length
-    files.set(path, { path, size, date: fromZipDate(obj.date), source: obj })
+    files.set(path, { id: newEntryId(), path, size, date: fromZipDate(obj.date), source: obj })
   }
   return { files, dirs, legacyNames }
+}
+
+// Decrypts every entry up front (into Blobs); the password is kept to save with again.
+async function readEncryptedZip(blob: Blob, encoding: NameEncoding, password: string | undefined) {
+  if (!password) throw new PasswordError('這個 ZIP 有密碼')
+  const zipjs = await import('@zip.js/zip.js')
+  const reader = new zipjs.ZipReader(new zipjs.BlobReader(blob))
+  try {
+    let legacyNames = false
+    let encryption: Encryption = 'aes'
+    const files = new Map<string, FileEntry>()
+    const dirs = new Set<string>()
+    for (const e of await reader.getEntries()) {
+      if (!e.filenameUTF8 && e.rawFilename.some((b) => b >= 0x80)) legacyNames = true
+      const path = normalizePath(e.filenameUTF8 ? e.filename : decodeName(e.rawFilename, encoding))
+      if (!path) continue
+      if (e.directory) {
+        dirs.add(path)
+        continue
+      }
+      if (e.encrypted && e.zipCrypto) encryption = 'zipcrypto'
+      const data = await e.getData(new zipjs.BlobWriter(), { password })
+      files.set(path, { id: newEntryId(), path, size: data.size, date: e.lastModDate, source: data })
+    }
+    return { files, dirs, legacyNames, protection: { password, encryption } }
+  } catch (err) {
+    if ((err as Error)?.message === zipjs.ERR_INVALID_PASSWORD) throw new PasswordError('密碼不對')
+    throw err
+  } finally {
+    await reader.close()
+  }
 }
 
 const blobCache = new WeakMap<JSZip.JSZipObject, Promise<Blob>>()
@@ -155,6 +216,7 @@ export function useArchive() {
   const dirty = ref(false)
   const legacyNames = ref(false)
   const encoding = ref<NameEncoding>('auto')
+  const protection = shallowRef<Protection | null>(null) // saved with this password
   const past = shallowRef<Snapshot[]>([])
   const future = shallowRef<Snapshot[]>([])
   // The state at the last download (or open, or "accept"): changes are shown against it.
@@ -174,18 +236,56 @@ export function useArchive() {
     return n
   })
 
-  // An entry is modified when its content was replaced. Renames keep the content but count as
-  // deleted + new, like git without rename detection.
+  // Files are matched with the baseline by id: modified means the content was replaced or the
+  // file was renamed (or both, like a tool turning photo.png into photo.jpg).
+  const byId = (m: Map<string, FileEntry>) => new Map([...m.values()].map((e) => [e.id, e]))
+  const currentById = computed(() => byId(files.value))
+  const baseById = computed(() => byId(baseFiles.value))
   const changes = computed(() => {
     const out = new Map<string, Change>()
     for (const [p, f] of files.value) {
-      const b = baseFiles.value.get(p)
+      const b = baseById.value.get(f.id)
       if (!b) out.set(p, 'U')
-      else if (b.source !== f.source) out.set(p, 'M')
+      else if (b.path !== p || b.source !== f.source) out.set(p, 'M')
     }
-    for (const p of baseFiles.value.keys()) if (!files.value.has(p)) out.set(p, 'D')
+    for (const b of baseFiles.value.values()) {
+      if (!currentById.value.has(b.id) && !out.has(b.path)) out.set(b.path, 'D')
+    }
     return out
   })
+
+  // How a file was at the baseline: by id for a file that's there now, by path for a deleted one.
+  function baseOf(path: string): FileEntry | undefined {
+    const f = files.value.get(path)
+    return f ? baseById.value.get(f.id) : baseFiles.value.get(path)
+  }
+
+  // The id for a file written at `path`: the one already there, else the deleted file that was
+  // there at the baseline (so deleting and re-adding a file counts as modifying it), else new.
+  function idFor(path: string): number {
+    const here = files.value.get(path) ?? baseFiles.value.get(path)
+    return here && (files.value.get(path) || !currentById.value.has(here.id)) ? here.id : newEntryId()
+  }
+
+  // Puts files back the way they were at the baseline: everything at or under each path, files
+  // renamed into it go back to their old names, deleted ones come back, new ones go away.
+  function revert(paths: string[], label: string) {
+    const f = new Map(files.value)
+    const d = new Set(dirs.value)
+    for (const root of paths) {
+      const under = (p: string) => !root || p === root || p.startsWith(`${root}/`)
+      for (const [p, e] of files.value) {
+        if (!under(p)) continue
+        f.delete(p)
+        const b = baseById.value.get(e.id)
+        if (b) f.set(b.path, b)
+      }
+      for (const b of baseFiles.value.values()) if (under(b.path) && !currentById.value.has(b.id)) f.set(b.path, b)
+      for (const x of dirs.value) if (under(x) && !baseDirs.value.has(x)) d.delete(x)
+      for (const x of baseDirs.value) if (under(x)) d.add(x)
+    }
+    commit(f, d, label)
+  }
   // Folders that came or went with no files in them (made with 新資料夾, or removed while empty).
   // Folders with files are already covered by their files' changes.
   const dirChanges = computed(() => {
@@ -223,27 +323,37 @@ export function useArchive() {
     acceptChanges()
   }
 
-  async function open(blob: Blob, zipName: string, enc: NameEncoding = 'auto') {
-    const read = await readZip(blob, enc)
+  // Throws PasswordError when the zip needs a password (or a different one).
+  async function open(blob: Blob, zipName: string, enc: NameEncoding = 'auto', password?: string) {
+    const read = await readZip(blob, enc, password)
     original = blob
     encoding.value = enc
     legacyNames.value = read.legacyNames
+    protection.value = read.protection
     reset(read, zipName)
   }
 
   function create(zipName = 'archive.zip') {
     original = null
+    protection.value = null
     legacyNames.value = false
     reset({ files: new Map(), dirs: new Set() }, zipName)
   }
 
   async function reopenWithEncoding(enc: NameEncoding) {
-    if (original) await open(original, name.value, enc)
+    if (original) await open(original, name.value, enc, protection.value?.password)
+  }
+
+  // Changing the password is a change to save, like editing a file.
+  function setProtection(p: Protection | null) {
+    protection.value = p
+    dirty.value = true
   }
 
   function close() {
     doc = ++docs
     original = null
+    protection.value = null
     isOpen.value = false
     files.value = new Map()
     dirs.value = new Set()
@@ -303,7 +413,11 @@ export function useArchive() {
       const rest = f.path.slice(prefix.length)
       const slash = rest.indexOf('/')
       if (slash < 0) {
-        out.push({ path: f.path, name: rest, dir: false, size: f.size, date: f.date, count: 0, entry: f, change: changes.value.get(f.path) })
+        const change = changes.value.get(f.path)
+        out.push({
+          path: f.path, name: rest, dir: false, size: f.size, date: f.date, count: 0, entry: f, change,
+          base: change === 'M' ? baseById.value.get(f.id) : undefined,
+        })
       } else {
         const row = folderRow(rest.slice(0, slash))
         row.size += f.size
@@ -325,7 +439,7 @@ export function useArchive() {
         row.change = row.change && row.change !== c ? 'M' : c
       } else if (c === 'D') {
         const b = baseFiles.value.get(p)!
-        out.push({ path: p, name: rest, dir: false, size: b.size, date: b.date, count: 0, change: 'D', gone: true })
+        out.push({ path: p, name: rest, dir: false, size: b.size, date: b.date, count: 0, change: 'D', gone: true, base: b })
       }
     }
     for (const d of baseDirs.value) if (isChild(d)) folderRow(d.slice(prefix.length))
@@ -348,7 +462,7 @@ export function useArchive() {
     const d = new Set(dirs.value)
     for (const { path, blob, date } of list) {
       const p = normalizePath(path)
-      if (p) f.set(p, { path: p, size: blob.size, date: date ?? new Date(), source: blob })
+      if (p) f.set(p, { id: idFor(p), path: p, size: blob.size, date: date ?? new Date(), source: blob })
     }
     for (const dir of newDirs) {
       const p = normalizePath(dir)
@@ -357,18 +471,19 @@ export function useArchive() {
     commit(f, d, label)
   }
 
-  // A result another tool sent back: write it at `path`, dropping `replaces` (where the previous
-  // version of the same result was, if its name has changed since).
-  function putResult(path: string, blob: Blob, replaces: string | undefined, label: string, mergeKey: string) {
+  // A result another tool sent back overwrites the file it was made from (`replaces`), renamed to
+  // `path` when the extension changed. It stays the same file, so it shows as modified.
+  function putResult(path: string, blob: Blob, replaces: string, label: string, mergeKey: string) {
     const f = new Map(files.value)
-    if (replaces && replaces !== path) f.delete(replaces)
-    f.set(path, { path, size: blob.size, date: new Date(), source: blob })
+    const id = files.value.get(replaces)?.id ?? idFor(path)
+    f.delete(replaces)
+    f.set(path, { id, path, size: blob.size, date: new Date(), source: blob })
     commit(f, dirs.value, label, mergeKey)
   }
 
   function writeFile(path: string, blob: Blob, label = `編輯「${baseName(path)}」`) {
     const f = new Map(files.value)
-    f.set(path, { path, size: blob.size, date: new Date(), source: blob })
+    f.set(path, { id: idFor(path), path, size: blob.size, date: new Date(), source: blob })
     commit(f, dirs.value, label)
   }
 
@@ -377,7 +492,7 @@ export function useArchive() {
     return {
       name: name.value, files: files.value, dirs: dirs.value, dirty: dirty.value, legacyNames: legacyNames.value,
       encoding: encoding.value, past: past.value, future: future.value, baseFiles: baseFiles.value,
-      baseDirs: baseDirs.value, original, doc,
+      baseDirs: baseDirs.value, original, protection: protection.value, doc,
     }
   }
 
@@ -393,6 +508,7 @@ export function useArchive() {
     baseFiles.value = s.baseFiles
     baseDirs.value = s.baseDirs
     original = s.original
+    protection.value = s.protection
     doc = s.doc
     isOpen.value = true
   }
@@ -449,9 +565,11 @@ export function useArchive() {
   }
 
   // Replaces everything with another zip's content (e.g. the simplified/traditional conversion).
+  // Same-named files keep their ids, so they show as modified rather than deleted and new.
   async function replaceWith(blob: Blob, label: string) {
     const read = await readZip(blob)
-    commit(read.files, read.dirs, label)
+    const f = new Map([...read.files].map(([p, v]) => [p, { ...v, id: idFor(p) }]))
+    commit(f, read.dirs, label)
   }
 
   // Adds another zip's content under `dir`, overwriting same-named files.
@@ -461,13 +579,15 @@ export function useArchive() {
     const d = new Set(dirs.value)
     for (const v of read.files.values()) {
       const p = joinPath(dir, v.path)
-      f.set(p, { ...v, path: p })
+      f.set(p, { ...v, id: idFor(p), path: p })
     }
     for (const k of read.dirs) d.add(joinPath(dir, k))
     commit(f, d, label)
   }
 
-  async function generate(level: number, onProgress?: (percent: number) => void): Promise<Blob> {
+  // `encrypt` false leaves the password out, for handing the zip to another tool.
+  async function generate(level: number, onProgress?: (percent: number) => void, encrypt = true): Promise<Blob> {
+    if (protection.value && encrypt) return generateEncrypted(protection.value, level, onProgress)
     const zip = new JSZip()
     const now = toZipDate(new Date())
     for (const dir of [...allDirs.value].sort()) zip.file(`${dir}/`, null, { dir: true, date: now })
@@ -492,16 +612,33 @@ export function useArchive() {
     return blob
   }
 
+  // With a password the whole zip is written by zip.js; nothing can be copied over as is.
+  async function generateEncrypted(p: Protection, level: number, onProgress?: (percent: number) => void) {
+    const zipjs = await import('@zip.js/zip.js')
+    const writer = new zipjs.ZipWriter(new zipjs.BlobWriter('application/zip'), {
+      password: p.password, zipCrypto: p.encryption === 'zipcrypto', encryptionStrength: 3, level,
+    })
+    for (const dir of [...allDirs.value].sort()) await writer.add(`${dir}/`, undefined, { directory: true })
+    const list = [...files.value.values()].sort((a, b) => (a.path < b.path ? -1 : 1))
+    for (const [i, f] of list.entries()) {
+      await writer.add(f.path, new zipjs.BlobReader(await readEntry(f)), { lastModDate: f.date })
+      onProgress?.(((i + 1) / list.length) * 100)
+    }
+    return writer.close()
+  }
+
   function markSaved() {
     dirty.value = false
     acceptChanges()
   }
 
   return {
-    isOpen, name, files, dirs, allDirs, totalSize, dirty, legacyNames, encoding, changes, changeCount, acceptChanges,
+    isOpen, name, files, dirs, allDirs, totalSize, dirty, legacyNames, encoding, protection, changes, changeCount, acceptChanges,
+    setProtection,
     canUndo: computed(() => past.value.length > 0),
     canRedo: computed(() => future.value.length > 0),
     docId: () => doc,
+    baseOf, revert,
     open, create, close, reopenWithEncoding, suspend, resume, undo, redo, children, exists,
     addFiles, writeFile, putResult, mkdir, remove, rename, replaceWith, mergeFrom, generate, markSaved,
   }

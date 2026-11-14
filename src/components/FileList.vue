@@ -24,6 +24,7 @@ const emit = defineEmits<{
   cancelRename: []
   remove: [row: Row]
   download: [row: Row]
+  revert: [row: Row]
 }>()
 
 // Deleted files are listed (struck out) but can't be selected.
@@ -33,7 +34,10 @@ const allSelected = computed(() => selectable.value.length > 0 && selectable.val
 const FILE_CHANGE: Record<Change, string> = { U: '新檔案', M: '已修改', D: '已刪除' }
 const FOLDER_CHANGE: Record<Change, string> = { U: '裡面有新檔案', M: '裡面有修改', D: '裡面有刪除的檔案' }
 const changeTitle = (row: Row) =>
-  row.dir ? (row.gone ? '已刪除的資料夾' : FOLDER_CHANGE[row.change!]) : FILE_CHANGE[row.change!]
+  row.dir ? (row.gone ? '已刪除的資料夾' : FOLDER_CHANGE[row.change!])
+    : FILE_CHANGE[row.change!] + (row.base && row.base.path !== row.path ? `（原本是「${row.base.path}」）` : '')
+const REVERT_TITLE: Record<Change, string> = { U: '還原：移除這個新檔案', M: '還原：換回原檔', D: '還原：把刪掉的檔案找回來' }
+const revertTitle = (row: Row) => (row.dir ? '還原：資料夾裡的變更全部還原' : REVERT_TITLE[row.change!])
 
 function icon(row: Row): IconName {
   if (row.dir) return 'folder'
@@ -115,12 +119,17 @@ function cancelRename() {
 
         <span class="size">{{ fmtBytes(row.size) }}</span>
         <span class="date">{{ row.date ? fmtDate(row.date) : '' }}</span>
-        <span v-if="row.gone" class="acts"></span>
+        <span v-if="row.gone" class="acts">
+          <button type="button" class="ib" :title="revertTitle(row)" @click="emit('revert', row)"><Icon name="undo" /></button>
+        </span>
         <span v-else class="acts">
-          <button v-if="!row.dir" type="button" class="ib" title="下載這個檔案" @click="emit('download', row)">
+          <button v-if="!row.dir" type="button" class="ib dl" title="下載這個檔案" @click="emit('download', row)">
             <Icon name="download" />
           </button>
-          <button type="button" class="ib" title="重新命名" @click="emit('startRename', row.path)"><Icon name="pencil" /></button>
+          <button v-if="row.change" type="button" class="ib" :title="revertTitle(row)" @click="emit('revert', row)">
+            <Icon name="undo" />
+          </button>
+          <button type="button" class="ib rn" title="重新命名" @click="emit('startRename', row.path)"><Icon name="pencil" /></button>
           <button type="button" class="ib danger" title="刪除" @click="emit('remove', row)"><Icon name="trash" /></button>
         </span>
       </li>
@@ -145,7 +154,7 @@ function cancelRename() {
 
 .head, .row {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 84px 132px 108px;
+  grid-template-columns: 36px minmax(0, 1fr) 84px 132px 140px;
   align-items: center;
 }
 .head { padding: 6px 8px 6px 4px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 600; }
@@ -198,7 +207,8 @@ ul { margin: 0; padding: 0; list-style: none; }
   .head, .row { grid-template-columns: 32px minmax(0, 1fr) 70px 72px; }
   .date { display: none; }
   .size { padding-right: 4px; font-size: 12px; }
-  .acts .ib:first-child { display: none; }
+  .acts .dl { display: none; }
+  .row[class*="ch-"] .acts .rn { display: none; } /* room for 還原 */
   .count { display: none; }
 }
 </style>

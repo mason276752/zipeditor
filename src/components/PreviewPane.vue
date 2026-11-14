@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { baseName, readEntry, type FileEntry } from '../archive'
+import { baseName, readEntry, type Change, type FileEntry } from '../archive'
 import { kindOf, looksLikeText, mimeOf, type Kind } from '../kinds'
 import { fmtBytes, fmtDate } from '../util'
 import { FILE_TOOLS, TOOLS, type FileKind, type Tool } from '../bridge'
 import { ensureDecodable } from '../heif'
 import Icon from './Icon.vue'
+import CompareFiles from './CompareFiles.vue'
 
-const props = defineProps<{ entry: FileEntry; canSend: boolean }>()
+// `base`: how a modified file was at the baseline, to compare with and revert to.
+const props = defineProps<{ entry: FileEntry; canSend: boolean; change?: Change; base?: FileEntry | null }>()
 const emit = defineEmits<{
   close: []
   save: [blob: Blob]
@@ -16,6 +18,7 @@ const emit = defineEmits<{
   remove: []
   send: [tool: Tool]
   dirty: [dirty: boolean]
+  revert: []
 }>()
 
 const EDIT_LIMIT = 5 * 1024 * 1024
@@ -27,6 +30,7 @@ const loading = ref(true)
 const failed = ref('')
 const dims = ref('')
 const mediaError = ref(false)
+const comparing = ref(false)
 const convertingHeif = ref(false)
 const sendTargets = computed<Tool[]>(() => (kind.value in FILE_TOOLS ? FILE_TOOLS[kind.value as FileKind] : []))
 
@@ -78,6 +82,7 @@ async function load() {
   failed.value = ''
   dims.value = ''
   mediaError.value = false
+  if (!props.base) comparing.value = false
   convertingHeif.value = false
   heifTried = false
   textMode.value = false
@@ -162,11 +167,20 @@ const lines = computed(() => (textMode.value ? text.value.split('\n').length : 0
     </header>
 
     <div class="tools">
-      <template v-if="textMode">
+      <template v-if="textMode && !comparing">
         <button type="button" class="btn primary" :disabled="!dirty" @click="save">儲存 <kbd>⌘S</kbd></button>
         <button type="button" class="btn" :disabled="!dirty" @click="revert">還原</button>
       </template>
-      <template v-if="canSend && !textMode">
+      <template v-if="change === 'M' && base">
+        <button type="button" class="btn" :class="{ on: comparing }" title="和上次下載（或確定）時的原檔並排比較"
+                @click="comparing = !comparing">
+          <Icon name="swap" />{{ comparing ? '結束比較' : '比較原檔' }}
+        </button>
+        <button type="button" class="btn" :title="`換回原本的「${baseName(base.path)}」`" @click="emit('revert')">
+          <Icon name="undo" />還原成原檔
+        </button>
+      </template>
+      <template v-if="canSend && !textMode && !comparing">
         <button v-for="t in sendTargets" :key="t" type="button" class="btn" :title="`傳到${TOOLS[t].label}：${TOOLS[t].hint}`"
                 @click="emit('send', t)">
           <Icon name="send" />{{ TOOLS[t].label }}
@@ -178,7 +192,8 @@ const lines = computed(() => (textMode.value ? text.value.split('\n').length : 0
       <button type="button" class="ib danger" title="刪除" @click="emit('remove')"><Icon name="trash" /></button>
     </div>
 
-    <div class="body" :class="{ checker: kind === 'image' && !textMode }">
+    <CompareFiles v-if="comparing && base" :base="base" :current="entry" />
+    <div v-else class="body" :class="{ checker: kind === 'image' && !textMode }">
       <p v-if="loading" class="note">讀取中…</p>
       <p v-else-if="failed" class="note warn">{{ failed }}</p>
 
@@ -225,6 +240,7 @@ header { display: flex; align-items: flex-start; gap: 8px; padding: 12px 10px 8p
 .tools .btn { min-height: 32px; padding: 4px 10px; font-size: 13px; }
 .tools kbd { padding: 0 4px; border-radius: 4px; background: rgb(255 255 255 / .2); font: inherit; font-size: 11px; opacity: .8; }
 .grow { flex: 1; }
+.tools .btn.on { border-color: var(--accent); color: var(--accent); }
 .ib {
   display: grid; place-items: center; width: 32px; height: 32px; padding: 0; flex: none;
   border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer;
