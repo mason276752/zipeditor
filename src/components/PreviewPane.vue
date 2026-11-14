@@ -4,6 +4,7 @@ import { baseName, readEntry, type FileEntry } from '../archive'
 import { kindOf, looksLikeText, mimeOf, type Kind } from '../kinds'
 import { fmtBytes, fmtDate } from '../util'
 import { FILE_TOOLS, TOOLS, type FileKind, type Tool } from '../bridge'
+import { ensureDecodable } from '../heif'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ entry: FileEntry; canSend: boolean }>()
@@ -26,6 +27,7 @@ const loading = ref(true)
 const failed = ref('')
 const dims = ref('')
 const mediaError = ref(false)
+const convertingHeif = ref(false)
 const sendTargets = computed<Tool[]>(() => (kind.value in FILE_TOOLS ? FILE_TOOLS[kind.value as FileKind] : []))
 
 // Text editing. The textarea only ever holds "\n"; CRLF files get theirs back on save.
@@ -37,6 +39,7 @@ const tooBig = ref(false)
 let crlf = false
 let bom = false
 let blob: Blob | null = null
+let heifTried = false
 
 const dirty = computed(() => textMode.value && text.value !== savedText.value)
 watch(dirty, (d) => emit('dirty', d))
@@ -75,6 +78,8 @@ async function load() {
   failed.value = ''
   dims.value = ''
   mediaError.value = false
+  convertingHeif.value = false
+  heifTried = false
   textMode.value = false
   tooBig.value = false
   notUtf8.value = false
@@ -107,6 +112,32 @@ function save() {
 
 function revert() {
   text.value = savedText.value
+}
+
+// Only Safari shows HEIC/HEIF. Elsewhere the <img> fails; convert to PNG (heif.js) and show that.
+async function onImageError() {
+  const entry = props.entry
+  if (heifTried || !blob) {
+    mediaError.value = true // not HEIF, or even the converted PNG didn't load
+    return
+  }
+  heifTried = true
+  convertingHeif.value = true
+  try {
+    const file = new File([blob], name.value, { type: mimeOf(entry.path) })
+    const png = await ensureDecodable(file)
+    if (entry !== props.entry) return // switched files meanwhile
+    if (png !== file) {
+      revoke()
+      url.value = URL.createObjectURL(png)
+      return
+    }
+  } catch (err) {
+    console.warn('HEIF decode failed', entry.path, err)
+  } finally {
+    if (entry === props.entry) convertingHeif.value = false
+  }
+  if (entry === props.entry) mediaError.value = true
 }
 
 function onImageLoad(e: Event) {
@@ -164,7 +195,8 @@ const lines = computed(() => (textMode.value ? text.value.split('\n').length : 0
       </div>
 
       <template v-else-if="kind === 'image'">
-        <img v-if="!mediaError" :src="url" :alt="name" @load="onImageLoad" @error="mediaError = true" />
+        <p v-if="convertingHeif" class="note">正在解碼 HEIF…</p>
+        <img v-else-if="!mediaError" :src="url" :alt="name" @load="onImageLoad" @error="onImageError" />
         <div v-else class="note">
           <p>這個瀏覽器無法預覽這張圖片。</p>
           <p v-if="canSend" class="small">可以傳到 Paste → JPG 轉成 JPG／WebP（支援 HEIC）。</p>

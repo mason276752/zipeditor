@@ -7,7 +7,7 @@
 ## 功能
 
 - **開啟**：選擇或拖入 ZIP；也可以拖入一般檔案或整個資料夾，直接打包成新的 ZIP
-- **預覽**：圖片、影片、音樂、PDF、文字檔；沒有副檔名的檔案（README、LICENSE…）會自動判斷是不是文字
+- **預覽**：圖片、影片、音樂、PDF、文字檔；沒有副檔名的檔案（README、LICENSE…）會自動判斷是不是文字。iPhone 的 HEIC／HEIF 在 Safari 以外的瀏覽器也能看（遇到時才載入 HEIF 解碼器，約 800 KB）
 - **編輯文字檔**：直接修改後按「儲存」或 `⌘S`／`Ctrl+S`；會保留原本的 CRLF 換行與 UTF-8 BOM
 - **整理**：新增檔案／資料夾、新文字檔、新資料夾、重新命名、刪除、多選刪除；名稱裡打 `/` 可以搬到別的資料夾（`/` 開頭代表從根目錄算起）
 - **復原／重做**：所有操作都能復原（`⌘Z`、`⌘⇧Z`）
@@ -28,6 +28,8 @@
 | ZIP 編輯器 | [audiospeed](https://github.com/mason276752/audiospeed) | 勾選音檔或在預覽裡按「音檔變速」，把音檔送去加快／放慢（音高不變） |
 | ZIP 編輯器 | [pdfcompress](https://github.com/mason276752/pdfcompress) | 勾選 PDF 或在預覽裡按「PDF 壓縮」，把 PDF 送去縮小裡面的圖片 |
 | paste2jpg、upscale、removebg、audiospeed、pdfcompress | ZIP 編輯器 | 「傳到 ZIP 編輯器」把處理好的檔案打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
+| upscale | removebg | 「傳到去背」把放大後的圖直接交給去背，不經過 ZIP 編輯器 |
+| removebg | upscale、paste2jpg | 「傳到圖片放大」「傳到 Paste → JPG」把去背圖直接交過去（Paste → JPG 選 WebP 會保留透明） |
 
 對方的分頁沒開的話會自動開新分頁。哪些工具收哪種檔案定義在 `src/bridge.ts` 的 `FILE_TOOLS`。
 
@@ -40,7 +42,7 @@
 | `{type:'ping'}` | 詢問有哪些分頁開著 |
 | `{type:'ready', id}`／`{type:'bye', id}` | 分頁宣告自己開著／要關閉 |
 | `{type:'zip', to, id, file, from?, replyTo?, inReplyTo?}` | 傳一個 ZIP 給 `to` 這個分頁 |
-| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg、upscale、removebg、audiospeed、pdfcompress 接收用） |
+| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg、upscale、removebg、audiospeed、pdfcompress 接收用；ZIP 編輯器或其他工具都可能是寄件人） |
 | `{type:'received', id}` | 收件分頁的回條 |
 
 `replyTo: {app, to}` 請對方把處理結果傳回 `app` channel 上的 `to` 分頁，而不是直接下載；回傳的訊息帶 `inReplyTo` 對應原本的 `id`。對方 3 秒內沒回條就改成下載。
@@ -60,3 +62,5 @@ npm run build      # 型別檢查 + 輸出到 dist/
 ## 授權
 
 使用 [Vue](https://vuejs.org/)（MIT）與 [JSZip](https://stuk.github.io/jszip/)（MIT／GPLv3 雙授權，此處採 MIT）。
+
+HEIF 預覽用 [heic-to](https://github.com/hoppergee/heic-to)（內含 [libheif](https://github.com/strukturag/libheif)，LGPL-3.0）：未修改，打包成獨立的檔案，只在瀏覽器無法原生顯示 HEIF 時載入；授權全文隨網站發布在 `heic-to.LICENSE`。
