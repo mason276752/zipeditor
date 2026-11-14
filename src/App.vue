@@ -38,7 +38,7 @@ const selectedOfKind = (k: FileKind) => selectedRows.value.filter((r) => !r.dir 
 const selectedByKind = computed(() =>
   (Object.keys(FILE_TOOLS) as FileKind[]).map((k) => ({ kind: k, rows: selectedOfKind(k) })).filter((g) => g.rows.length),
 )
-const KIND_UNIT: Record<FileKind, string> = { image: '張圖片', audio: '個音檔' }
+const KIND_UNIT: Record<FileKind, string> = { image: '張圖片', audio: '個音檔', pdf: '個 PDF ' }
 const cwdName = computed(() => (cwd.value ? baseName(cwd.value) : name.value))
 const entryRow = (e: FileEntry): Row => ({
   path: e.path, name: baseName(e.path), dir: false, size: e.size, date: e.date, count: 0, entry: e,
@@ -286,7 +286,7 @@ async function convert() {
   }
 }
 
-// Images go to paste2jpg / upscale / removebg, audio to audiospeed. Each tool sends its
+// Images go to paste2jpg / upscale / removebg, audio to audiospeed, PDFs to pdfcompress. Each tool sends its
 // results back as a zip, which lands in the inbox below.
 async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
   if (!list.length) return
@@ -305,7 +305,7 @@ async function sendFiles(target: Tool, list: Row[], kind: FileKind) {
 function sendActive(target: Tool) {
   const e = activeEntry.value
   const kind = e && kindOf(baseName(e.path))
-  if (e && (kind === 'image' || kind === 'audio')) sendFiles(target, [entryRow(e)], kind)
+  if (e && kind && kind in FILE_TOOLS) sendFiles(target, [entryRow(e)], kind as FileKind)
 }
 
 async function onZip(d: ZipDelivery) {

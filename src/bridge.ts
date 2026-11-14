@@ -11,7 +11,7 @@
 // replyTo {app, to} asks the receiver to send its result back to that tab instead of
 // downloading it; the answer carries inReplyTo with the request's id.
 
-export type Tool = 'paste2jpg' | 'ziptotaiwanzip' | 'upscale' | 'removebg' | 'audiospeed'
+export type Tool = 'paste2jpg' | 'ziptotaiwanzip' | 'upscale' | 'removebg' | 'audiospeed' | 'pdfcompress'
 
 export const TOOLS: Record<Tool, { url: string; label: string; hint?: string }> = {
   paste2jpg: { url: '../paste2jpg/', label: 'Paste → JPG', hint: '轉成 JPG／WebP' },
@@ -19,13 +19,15 @@ export const TOOLS: Record<Tool, { url: string; label: string; hint?: string }> 
   upscale: { url: '../upscale/', label: '圖片放大', hint: 'AI 放大 2 倍或 4 倍' },
   removebg: { url: '../removebg/', label: '去背', hint: 'AI 去除背景，可手動修補' },
   audiospeed: { url: '../audiospeed/', label: '音檔變速', hint: '加快或放慢，音高不變' },
+  pdfcompress: { url: '../pdfcompress/', label: 'PDF 壓縮', hint: '縮小裡面的圖片，文字維持原樣' },
 }
 
 // Tools that take loose files ({type:'files'}), by the kind of file they want.
-export type FileKind = 'image' | 'audio'
+export type FileKind = 'image' | 'audio' | 'pdf'
 export const FILE_TOOLS: Record<FileKind, Tool[]> = {
   image: ['paste2jpg', 'upscale', 'removebg'],
   audio: ['audiospeed'],
+  pdf: ['pdfcompress'],
 }
 
 const SELF = 'zipeditor'

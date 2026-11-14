@@ -26,20 +26,21 @@
 | ZIP 編輯器 | [upscale](https://github.com/mason276752/upscale) | 勾選圖片或在預覽裡按「圖片放大」，把圖片送去 AI 放大 2×／4× |
 | ZIP 編輯器 | [removebg](https://github.com/mason276752/removebg) | 勾選圖片或在預覽裡按「去背」，把圖片送去 AI 去背 |
 | ZIP 編輯器 | [audiospeed](https://github.com/mason276752/audiospeed) | 勾選音檔或在預覽裡按「音檔變速」，把音檔送去加快／放慢（音高不變） |
-| paste2jpg、upscale、removebg、audiospeed | ZIP 編輯器 | 「傳到 ZIP 編輯器」把處理好的檔案打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
+| ZIP 編輯器 | [pdfcompress](https://github.com/mason276752/pdfcompress) | 勾選 PDF 或在預覽裡按「PDF 壓縮」，把 PDF 送去縮小裡面的圖片 |
+| paste2jpg、upscale、removebg、audiospeed、pdfcompress | ZIP 編輯器 | 「傳到 ZIP 編輯器」把處理好的檔案打包傳過來；編輯器沒開 ZIP 時直接開啟，否則可以合併到目前資料夾 |
 
 對方的分頁沒開的話會自動開新分頁。哪些工具收哪種檔案定義在 `src/bridge.ts` 的 `FILE_TOOLS`。
 
 ### 訊息格式
 
-每個工具監聽以自己命名的 channel（`zipeditor`、`ziptotaiwanzip`、`paste2jpg`、`upscale`、`removebg`、`audiospeed`）：
+每個工具監聽以自己命名的 channel（`zipeditor`、`ziptotaiwanzip`、`paste2jpg`、`upscale`、`removebg`、`audiospeed`、`pdfcompress`）：
 
 | 訊息 | 說明 |
 | --- | --- |
 | `{type:'ping'}` | 詢問有哪些分頁開著 |
 | `{type:'ready', id}`／`{type:'bye', id}` | 分頁宣告自己開著／要關閉 |
 | `{type:'zip', to, id, file, from?, replyTo?, inReplyTo?}` | 傳一個 ZIP 給 `to` 這個分頁 |
-| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg、upscale、removebg、audiospeed 接收用） |
+| `{type:'files', to, id, files, from?}` | 傳多個檔案（paste2jpg、upscale、removebg、audiospeed、pdfcompress 接收用） |
 | `{type:'received', id}` | 收件分頁的回條 |
 
 `replyTo: {app, to}` 請對方把處理結果傳回 `app` channel 上的 `to` 分頁，而不是直接下載；回傳的訊息帶 `inReplyTo` 對應原本的 `id`。對方 3 秒內沒回條就改成下載。
